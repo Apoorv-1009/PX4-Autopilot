@@ -1,10 +1,11 @@
-name: Windows SITL cross-build
+name: Windows SITL build
 
-# Cross-compile px4_sitl_default for Windows x86_64 via MinGW-w64. This is
-# the regression gate for the platforms/posix Windows shim layer and
-# toolchain. The toolchain is resolved by bare name through
-# CMAKE_MODULE_PATH (extended by cmake/kconfig.cmake to include
-# platforms/posix/cmake).
+# Build px4_sitl_default for Windows on both supported toolchains:
+#   - MinGW-w64 cross-compile from Ubuntu (gate for the platforms/posix
+#     Windows shim layer and ld --wrap socket plumbing)
+#   - Native MSVC on a Windows runner (gate for the _MSC_VER paths in
+#     the shim headers and the MSVC-only sources under
+#     src/px4/windows/posix, e.g. socket_msvc.cpp / sys/time.cpp)
 
 on:
   push:
@@ -27,17 +28,29 @@ concurrency:
 
 jobs:
   build:
-    name: Windows SITL (MinGW)
-    runs-on: ubuntu-24.04
-    env:
-      CMAKE_ARGS: -DCMAKE_TOOLCHAIN_FILE=Toolchain-mingw-w64-x86_64
+    name: Windows SITL (${{ matrix.toolchain }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: MinGW
+            runner: ubuntu-24.04
+            artifact: px4-sitl-windows-x86_64-mingw
+          - toolchain: MSVC
+            runner: windows-2022
+            artifact: px4-sitl-windows-x86_64-msvc
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
+      # ---- MinGW cross-build path (Ubuntu host) ----
+
       - name: Install MinGW-w64 + PX4 base deps
+        if: matrix.toolchain == 'MinGW'
         run: |
           sudo apt-get update
           # The *-posix variants of gcc/g++ ship winpthreads which PX4
@@ -51,20 +64,60 @@ jobs:
               python3-toml python3-numpy python3-packaging \
               python3-jsonschema python3-future
 
-      - name: Setup ccache
+      - name: Setup ccache (MinGW)
+        if: matrix.toolchain == 'MinGW'
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: ccache-windows-sitl
+          key: ccache-windows-sitl-mingw
           max-size: 500M
 
-      - name: Cross-build px4.exe
+      - name: Cross-build px4.exe (MinGW)
+        if: matrix.toolchain == 'MinGW'
+        env:
+          CMAKE_ARGS: -DCMAKE_TOOLCHAIN_FILE=Toolchain-mingw-w64-x86_64
         run: make px4_sitl_default
+
+      # ---- MSVC native path (Windows host) ----
+
+      - name: Setup Python (MSVC)
+        if: matrix.toolchain == 'MSVC'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps (MSVC)
+        if: matrix.toolchain == 'MSVC'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install jinja2 pyyaml toml numpy packaging jsonschema future empy pyros-genmsg
+
+      - name: Install Ninja (MSVC)
+        if: matrix.toolchain == 'MSVC'
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Enable MSVC environment (x64)
+        if: matrix.toolchain == 'MSVC'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Native-build px4.exe (MSVC)
+        if: matrix.toolchain == 'MSVC'
+        shell: pwsh
+        run: |
+          cmake -S . -B build/px4_sitl_default -G Ninja `
+              -DCONFIG=px4_sitl_default `
+              -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/px4_sitl_default
+
+      # ---- Common ----
 
       - name: Upload px4.exe artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: px4-sitl-windows-x86_64
+          name: ${{ matrix.artifact }}
           path: build/px4_sitl_default/bin/px4.exe
           if-no-files-found: error
           retention-days: 14
