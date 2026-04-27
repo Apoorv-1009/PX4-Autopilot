@@ -41,7 +41,7 @@
 # define CONFIG_CDCACM_PRODUCTID 0
 #endif
 
-#if defined(__PX4_LINUX)
+#if defined(__PX4_LINUX) || defined(__PX4_DARWIN) || defined(__PX4_CYGWIN)
 #include <sys/utsname.h>
 #endif
 
@@ -300,9 +300,9 @@ uint32_t px4_board_version(void)
 
 uint32_t px4_os_version(void)
 {
-#if defined(__PX4_DARWIN) || defined(__PX4_CYGWIN) || defined(__PX4_QURT) || defined(__PX4_WINDOWS)
-	return 0; //TODO: implement version for Darwin, Cygwin, QuRT, Windows
-#elif defined(__PX4_LINUX)
+#if defined(__PX4_QURT) || defined(__PX4_WINDOWS)
+	return 0;
+#elif defined(__PX4_LINUX) || defined(__PX4_DARWIN) || defined(__PX4_CYGWIN)
 	struct utsname name;
 
 	if (uname(&name) == 0) {
