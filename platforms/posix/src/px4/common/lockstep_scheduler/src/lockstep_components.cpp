@@ -40,7 +40,36 @@
 #include <drivers/drv_hrt.h>
 #include <px4_platform_common/log.h>
 #include <px4_platform_common/tasks.h>
+#include <px4_platform_common/time.h>
 #include <limits.h>
+#include <stdlib.h>
+
+static uint64_t lockstep_wall_time_us()
+{
+	timespec ts{};
+	system_clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (static_cast<uint64_t>(ts.tv_sec) * 1000000ULL) + (static_cast<uint64_t>(ts.tv_nsec) / 1000ULL);
+}
+
+static uint64_t lockstep_component_wait_budget_us()
+{
+	static const uint64_t wait_budget_us = []() -> uint64_t {
+		const char *speed_factor_env = getenv("PX4_SIM_SPEED_FACTOR");
+
+		if (speed_factor_env != nullptr) {
+			const double speed_factor = strtod(speed_factor_env, nullptr);
+
+			if (speed_factor > 0.) {
+				const uint64_t budget = static_cast<uint64_t>(1000. / speed_factor);
+				return budget < 10ULL ? 10ULL : (budget > 100ULL ? 100ULL : budget);
+			}
+		}
+
+		return 100ULL;
+	}();
+
+	return wait_budget_us;
+}
 
 LockstepComponents::LockstepComponents(bool no_cleanup_on_destroy)
 	: _no_cleanup_on_destroy(no_cleanup_on_destroy)
@@ -128,5 +157,28 @@ void LockstepComponents::wait_for_components()
 		return;
 	}
 
+#if defined(__PX4_WINDOWS) || defined(__PX4_LINUX)
+	// Do not let one temporarily blocked component stall the simulator forever.
+	// Keep the watchdog short: high lockstep speed factors need sub-millisecond
+	// barrier overhead, and active components normally release the latch first.
+	const uint64_t wait_start_us = lockstep_wall_time_us();
+	const uint64_t max_wait_us = lockstep_component_wait_budget_us();
+	unsigned spin_count = 0;
+
+	while (px4_sem_trywait(&_components_sem) != 0) {
+		if (_components_used_bitset == 0) {
+			return;
+		}
+
+		if ((lockstep_wall_time_us() - wait_start_us) >= max_wait_us) {
+			return;
+		}
+
+		if (++spin_count % 16 == 0) {
+			sched_yield();
+		}
+	}
+#else
 	while (px4_sem_wait(&_components_sem) != 0) {}
+#endif
 }

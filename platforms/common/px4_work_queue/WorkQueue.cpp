@@ -192,6 +192,10 @@ void WorkQueue::Run()
 
 #if defined(ENABLE_LOCKSTEP_SCHEDULER)
 
+		if (_lockstep_component != -1) {
+			px4_lockstep_progress(_lockstep_component);
+		}
+
 		if (_q.empty()) {
 			px4_lockstep_unregister_component(_lockstep_component);
 			_lockstep_component = -1;

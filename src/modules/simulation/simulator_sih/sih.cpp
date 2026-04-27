@@ -45,6 +45,8 @@
 
 #include <px4_platform_common/getopt.h>
 #include <px4_platform_common/log.h>
+#include <px4_platform_common/tasks.h>
+#include <px4_platform_common/time.h>
 
 #include <drivers/drv_pwm_output.h>         // to get PWM flags
 #include <lib/drivers/device/Device.hpp>
@@ -92,12 +94,50 @@ void Sih::run()
 }
 
 #if defined(ENABLE_LOCKSTEP_SCHEDULER)
-// Get current timestamp in microseconds
-static uint64_t micros()
+static uint64_t wall_time_us()
 {
+#if defined(__PX4_WINDOWS)
 	struct timeval t;
 	gettimeofday(&t, nullptr);
-	return t.tv_sec * ((uint64_t)1000000) + t.tv_usec;
+	return t.tv_sec * static_cast<uint64_t>(1000000) + t.tv_usec;
+#else
+	timespec ts{};
+	system_clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (static_cast<uint64_t>(ts.tv_sec) * 1000000ULL) + (static_cast<uint64_t>(ts.tv_nsec) / 1000ULL);
+#endif
+}
+
+static void lockstep_wall_sleep(int sleep_time_us)
+{
+	if (sleep_time_us <= 0) {
+		return;
+	}
+
+	// Avoid coarse sub-millisecond sleeps limiting high lockstep speed factors.
+	if (sleep_time_us <= 1000) {
+		const uint64_t sleep_until_us = wall_time_us() + sleep_time_us;
+
+#if defined(__PX4_WINDOWS)
+		while (wall_time_us() < sleep_until_us) {
+			sched_yield();
+		}
+#else
+		while (true) {
+			const uint64_t now_us = wall_time_us();
+
+			if (now_us >= sleep_until_us) {
+				break;
+			}
+
+			if (sleep_until_us - now_us > 100) {
+				sched_yield();
+			}
+		}
+#endif
+
+	} else {
+		system_usleep(sleep_time_us);
+	}
 }
 
 void Sih::lockstep_loop()
@@ -126,7 +166,7 @@ void Sih::lockstep_loop()
 	uint64_t pre_compute_wall_time_us;
 
 	while (!should_exit()) {
-		pre_compute_wall_time_us = micros();
+		pre_compute_wall_time_us = wall_time_us();
 		perf_count(_loop_interval_perf);
 
 		_current_simulation_time_us += sim_interval_us;
@@ -144,18 +184,18 @@ void Sih::lockstep_loop()
 
 		if (_last_actuator_output_time <= 0) {
 			PX4_DEBUG("SIH starting up - no lockstep yet");
-			current_wall_time_us = micros();
+			current_wall_time_us = wall_time_us();
 			sleep_time = math::max(0, sim_interval_us - (int)(current_wall_time_us - pre_compute_wall_time_us));
 
 		} else {
 			px4_lockstep_wait_for_components();
-			current_wall_time_us = micros();
+			current_wall_time_us = wall_time_us();
 			sleep_time = math::max(0, rt_interval_us - (int)(current_wall_time_us - pre_compute_wall_time_us));
 		}
 
 		_achieved_speedup = 0.99f * _achieved_speedup + 0.01f * ((float)sim_interval_us / (float)(
 					    current_wall_time_us - pre_compute_wall_time_us + sleep_time));
-		usleep(sleep_time);
+		lockstep_wall_sleep(sleep_time);
 	}
 }
 #endif

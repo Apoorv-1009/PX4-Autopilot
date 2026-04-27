@@ -124,12 +124,61 @@ int LockstepScheduler::cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *loc
 		}
 	}
 
-	int result = pthread_cond_wait(cond, lock);
+	// On most pthread implementations pthread_cond_wait here would
+	// suffice — set_absolute_time broadcasts when our target is reached.
+	// winpthreads (MinGW), however, occasionally drops the broadcast
+	// when it races the waiter entering the wait, which leaves the
+	// thread blocked forever. Use pthread_cond_timedwait with a long
+	// real-time timeout (500 ms) as a watchdog: under a correct
+	// implementation the timeout never fires; under winpthreads it
+	// caps any lost-broadcast hang at 500 ms instead of forever.
+	int result = 0;
+
+	while (!timed_wait.timeout) {
+		struct timespec poll_deadline;
+		clock_gettime(CLOCK_REALTIME, &poll_deadline);
+		long total_ns = poll_deadline.tv_nsec + 500L * 1000L * 1000L;
+		poll_deadline.tv_sec += total_ns / 1000000000L;
+		poll_deadline.tv_nsec = total_ns % 1000000000L;
+
+		result = pthread_cond_timedwait(cond, lock, &poll_deadline);
+
+		if (timed_wait.timeout) {
+			break;
+		}
+
+		if (result == ETIMEDOUT) {
+			// Watchdog fired; re-check _time_us in case we lost the
+			// broadcast. _timed_waits_mutex is taken here only to
+			// synchronise with set_absolute_time.
+			_timed_waits_mutex.lock();
+
+			if (time_us <= _time_us) {
+				timed_wait.timeout = true;
+			}
+
+			_timed_waits_mutex.unlock();
+			continue;
+		}
+
+		if (result != 0) {
+			break;
+		}
+		// Spurious wakeup or real signal not reflected in `timeout`
+		// (shouldn't happen normally). Loop to re-check.
+	}
 
 	const bool timeout = timed_wait.timeout;
 
 	if (result == 0 && timeout) {
 		result = ETIMEDOUT;
+	}
+
+	if (result == ETIMEDOUT && !timeout) {
+		// pthread_cond_timedwait returned ETIMEDOUT but broadcast also
+		// flipped `timeout` true between our check and this moment — we
+		// re-enter the loop above so this branch is effectively dead.
+		result = 0;
 	}
 
 	timed_wait.done = true;
