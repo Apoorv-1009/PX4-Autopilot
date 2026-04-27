@@ -96,20 +96,26 @@ jobs:
         if: matrix.toolchain == 'MSVC'
         uses: seanmiddleditch/gha-setup-ninja@v5
 
+      - name: Install GNU make (MSVC)
+        if: matrix.toolchain == 'MSVC'
+        shell: pwsh
+        run: choco install -y make --no-progress
+
       - name: Enable MSVC environment (x64)
         if: matrix.toolchain == 'MSVC'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      # Run the standard top-level make target. With cl.exe + ninja on
+      # PATH (the previous step exports them via $GITHUB_ENV), the
+      # Makefile's existing Ninja branch picks the Ninja generator and
+      # cmake auto-detects MSVC as the host compiler — same entry point
+      # as Linux/macOS, no toolchain file needed.
       - name: Native-build px4.exe (MSVC)
         if: matrix.toolchain == 'MSVC'
-        shell: pwsh
-        run: |
-          cmake -S . -B build/px4_sitl_default -G Ninja `
-              -DCONFIG=px4_sitl_default `
-              -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/px4_sitl_default
+        shell: bash
+        run: make px4_sitl_default
 
       # ---- Common ----
 
