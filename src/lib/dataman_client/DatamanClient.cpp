@@ -37,6 +37,15 @@
 
 #include <dataman_client/DatamanClient.hpp>
 
+#if defined(ENABLE_LOCKSTEP_SCHEDULER) && defined(__PX4_WINDOWS)
+static hrt_abstime dataman_wall_time_us()
+{
+	timespec ts{};
+	system_clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (static_cast<hrt_abstime>(ts.tv_sec) * 1000000ULL) + (static_cast<hrt_abstime>(ts.tv_nsec) / 1000ULL);
+}
+#endif
+
 DatamanClient::DatamanClient()
 {
 	_sync_perf = perf_alloc(PC_ELAPSED, "DatamanClient: sync");
@@ -55,22 +64,11 @@ DatamanClient::DatamanClient()
 		_fds.fd = _dataman_response_sub;
 		_fds.events = POLLIN;
 
-		hrt_abstime timestamp = hrt_absolute_time();
-
-		dataman_request_s request;
-		request.timestamp = timestamp;
-		request.request_type = DM_GET_ID;
-		request.client_id = CLIENT_ID_NOT_SET;
-
-		bool success = syncHandler(request, response, timestamp, 1000_ms);
-
-		if (success && (response.client_id > CLIENT_ID_NOT_SET)) {
-
-			_client_id = response.client_id;
-
-		} else {
+#if !defined(ENABLE_LOCKSTEP_SCHEDULER)
+		if (!updateClientId(1000_ms)) {
 			PX4_ERR("Failed to get client ID!");
 		}
+#endif
 	}
 }
 
@@ -88,12 +86,28 @@ bool DatamanClient::syncHandler(const dataman_request_s &request, dataman_respon
 {
 	bool response_received = false;
 	int32_t ret = 0;
+#if defined(ENABLE_LOCKSTEP_SCHEDULER) && defined(__PX4_WINDOWS)
+	(void)start_time;
+	const hrt_abstime sync_start_time = dataman_wall_time_us();
+	hrt_abstime last_request_time = sync_start_time;
+	hrt_abstime time_elapsed = 0;
+	const unsigned max_iterations = (timeout / 1000) + 1;
+	unsigned iterations = 0;
+#else
 	hrt_abstime time_elapsed = hrt_elapsed_time(&start_time);
+#endif
 	perf_begin(_sync_perf);
 	_dataman_request_pub.publish(request);
 
 	while (!response_received && (time_elapsed < timeout)) {
+#if defined(ENABLE_LOCKSTEP_SCHEDULER) && defined(__PX4_WINDOWS)
+		if (++iterations > max_iterations) {
+			break;
+		}
 
+		bool updated = false;
+		orb_check(_dataman_response_sub, &updated);
+#else
 		uint32_t timeout_ms = 100;
 		ret = px4_poll(&_fds, 1, timeout_ms);
 
@@ -101,40 +115,58 @@ bool DatamanClient::syncHandler(const dataman_request_s &request, dataman_respon
 			PX4_ERR("px4_poll returned error: %" PRIu32, ret);
 			break;
 
-		} else if (ret == 0) {
+		}
 
-			// No response received, send new request
-			_dataman_request_pub.publish(request);
+		bool updated = false;
 
-		} else {
-
-			bool updated = false;
+		if (ret > 0) {
 			orb_check(_dataman_response_sub, &updated);
+		}
+#endif
 
-			if (updated) {
-				orb_copy(ORB_ID(dataman_response), _dataman_response_sub, &response);
+		if (updated) {
+			orb_copy(ORB_ID(dataman_response), _dataman_response_sub, &response);
 
-				if (response.client_id == request.client_id) {
+			if (response.client_id == request.client_id) {
 
-					if ((response.request_type == request.request_type) &&
-					    (response.item == request.item) &&
-					    (response.index == request.index)) {
-						response_received = true;
-						break;
-					}
+				if ((response.request_type == request.request_type) &&
+				    (response.item == request.item) &&
+				    (response.index == request.index)) {
+					response_received = true;
+					break;
+				}
 
-				} else if (request.client_id == CLIENT_ID_NOT_SET) {
+			} else if (request.client_id == CLIENT_ID_NOT_SET) {
 
-					// validate timestamp from response.data
-					if (0 == memcmp(&(request.timestamp), &(response.data), sizeof(hrt_abstime))) {
-						response_received = true;
-						break;
-					}
+				// validate timestamp from response.data
+				if (0 == memcmp(&(request.timestamp), &(response.data), sizeof(hrt_abstime))) {
+					response_received = true;
+					break;
 				}
 			}
 		}
 
+#if defined(ENABLE_LOCKSTEP_SCHEDULER) && defined(__PX4_WINDOWS)
+		const hrt_abstime now = dataman_wall_time_us();
+
+		if (now - last_request_time >= 100_ms) {
+			_dataman_request_pub.publish(request);
+			last_request_time = now;
+		}
+
+		system_usleep(1000);
+#else
+		if (ret == 0) {
+			// No response received, send new request
+			_dataman_request_pub.publish(request);
+		}
+#endif
+
+#if defined(ENABLE_LOCKSTEP_SCHEDULER) && defined(__PX4_WINDOWS)
+		time_elapsed = dataman_wall_time_us() - sync_start_time;
+#else
 		time_elapsed = hrt_elapsed_time(&start_time);
+#endif
 	}
 
 	perf_end(_sync_perf);
@@ -146,9 +178,37 @@ bool DatamanClient::syncHandler(const dataman_request_s &request, dataman_respon
 	return response_received;
 }
 
+bool DatamanClient::updateClientId(hrt_abstime timeout)
+{
+	if (_client_id != CLIENT_ID_NOT_SET) {
+		return true;
+	}
+
+	if (_dataman_response_sub < 0) {
+		return false;
+	}
+
+	dataman_response_s response{};
+	hrt_abstime timestamp = hrt_absolute_time();
+
+	dataman_request_s request{};
+	request.timestamp = timestamp;
+	request.request_type = DM_GET_ID;
+	request.client_id = CLIENT_ID_NOT_SET;
+
+	const bool success = syncHandler(request, response, timestamp, timeout);
+
+	if (success && (response.client_id > CLIENT_ID_NOT_SET)) {
+		_client_id = response.client_id;
+		return true;
+	}
+
+	return false;
+}
+
 bool DatamanClient::readSync(dm_item_t item, uint32_t index, uint8_t *buffer, uint32_t length, hrt_abstime timeout)
 {
-	if (_client_id == CLIENT_ID_NOT_SET) {
+	if (_client_id == CLIENT_ID_NOT_SET && !updateClientId(timeout)) {
 		return false;
 	}
 
@@ -188,7 +248,7 @@ bool DatamanClient::readSync(dm_item_t item, uint32_t index, uint8_t *buffer, ui
 
 bool DatamanClient::writeSync(dm_item_t item, uint32_t index, uint8_t *buffer, uint32_t length, hrt_abstime timeout)
 {
-	if (_client_id == CLIENT_ID_NOT_SET) {
+	if (_client_id == CLIENT_ID_NOT_SET && !updateClientId(timeout)) {
 		return false;
 	}
 
@@ -227,7 +287,7 @@ bool DatamanClient::writeSync(dm_item_t item, uint32_t index, uint8_t *buffer, u
 
 bool DatamanClient::clearSync(dm_item_t item, hrt_abstime timeout)
 {
-	if (_client_id == CLIENT_ID_NOT_SET) {
+	if (_client_id == CLIENT_ID_NOT_SET && !updateClientId(timeout)) {
 		return false;
 	}
 
@@ -257,7 +317,7 @@ bool DatamanClient::clearSync(dm_item_t item, hrt_abstime timeout)
 
 bool DatamanClient::readAsync(dm_item_t item, uint32_t index, uint8_t *buffer, uint32_t length)
 {
-	if (_client_id == CLIENT_ID_NOT_SET) {
+	if (_client_id == CLIENT_ID_NOT_SET && !updateClientId(5000_ms)) {
 		return false;
 	}
 
@@ -299,7 +359,7 @@ bool DatamanClient::readAsync(dm_item_t item, uint32_t index, uint8_t *buffer, u
 
 bool DatamanClient::writeAsync(dm_item_t item, uint32_t index, uint8_t *buffer, uint32_t length)
 {
-	if (_client_id == CLIENT_ID_NOT_SET) {
+	if (_client_id == CLIENT_ID_NOT_SET && !updateClientId(5000_ms)) {
 		return false;
 	}
 
@@ -343,7 +403,7 @@ bool DatamanClient::writeAsync(dm_item_t item, uint32_t index, uint8_t *buffer, 
 
 bool DatamanClient::clearAsync(dm_item_t item)
 {
-	if (_client_id == CLIENT_ID_NOT_SET) {
+	if (_client_id == CLIENT_ID_NOT_SET && !updateClientId(5000_ms)) {
 		return false;
 	}
 
