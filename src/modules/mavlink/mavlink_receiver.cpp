@@ -3328,7 +3328,7 @@ MavlinkReceiver::run()
 
 			else if (_mavlink.get_protocol() == Protocol::UDP) {
 				if (fds[0].revents & POLLIN) {
-					nread = recvfrom(_mavlink.get_socket_fd(), buf, sizeof(buf), 0, (struct sockaddr *)&srcaddr, &addrlen);
+					nread = recvfrom(_mavlink.get_socket_fd(), (char *)buf, sizeof(buf), 0, (struct sockaddr *)&srcaddr, &addrlen);
 				}
 
 				struct sockaddr_in &srcaddr_last = _mavlink.get_client_source_address();
