@@ -2,6 +2,7 @@
 #include <px4_platform_common/time.h>
 #include <px4_platform_common/posix.h>
 #include <px4_platform_common/log.h>
+#include <px4_platform_common/exit.h>
 #include <uORB/uORB.h>
 
 #include "apps.h"
@@ -45,7 +46,7 @@ int shutdown_main(int argc, char *argv[])
 {
 	printf("Exiting NOW.\n");
 	uorb_shutdown();
-	system_exit(0);
+	px4_platform_exit(0);
 }
 
 int list_tasks_main(int argc, char *argv[])

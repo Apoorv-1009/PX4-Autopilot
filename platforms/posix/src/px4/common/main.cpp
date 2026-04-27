@@ -53,7 +53,6 @@
 
 #include <string>
 #include <algorithm>
-#include <fstream>
 #include <signal.h>
 #include <stdio.h>
 #include <errno.h>
@@ -63,8 +62,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#if (_POSIX_MEMLOCK > 0)
+#if (_POSIX_MEMLOCK > 0) && !defined(__PX4_WINDOWS)
 #include <sys/mman.h>
+#endif
+
+#ifdef __PX4_WINDOWS
+// MinGW ships no shell at /bin/sh, no geteuid, no sigaction.
+// mkdir is already a 2-arg POSIX wrapper via the windows_shim sys/stat.h.
+// Provide the remaining forwards inline so the stock POSIX main.cpp
+// compiles unchanged.
+#include <windows.h>
+#include <px4_windows/platform.h>
+static inline unsigned int geteuid(void) { return 1000; }
 #endif
 
 #include <px4_platform_common/time.h>
@@ -73,6 +82,7 @@
 #include <px4_platform_common/getopt.h>
 #include <px4_platform_common/tasks.h>
 #include <px4_platform_common/posix.h>
+#include <px4_platform_common/shell.h>
 #include <uORB/uORB.h>
 
 #include "apps.h"
@@ -90,6 +100,7 @@ static const char *LOCK_FILE_PATH = "/tmp/px4_lock";
 
 
 static volatile bool _exit_requested = false;
+static volatile sig_atomic_t _shutdown_started = 0;
 
 
 namespace px4
@@ -111,9 +122,69 @@ static int set_server_running(int instance);
 static void print_usage();
 static bool dir_exists(const std::string &path);
 static bool file_exists(const std::string &name);
+static bool is_absolute_path(const std::string &path);
+static bool is_path_separator(char ch);
 static std::string file_basename(std::string const &pathname);
 static std::string pwd();
 static int change_directory(const std::string &directory);
+
+#ifdef __PX4_WINDOWS
+// Unblock the main thread's getchar() so the pxh loop can notice
+// _should_exit. Windows delivers Ctrl+C on a dedicated handler thread,
+// which means just flipping a flag leaves the main thread blocked in its
+// stdin ReadFile forever. Two nudges, tried in order:
+//   1) inject a synthetic '\n' keypress into the console input buffer so
+//      getchar() returns cleanly; works when stdin is an attached console;
+//   2) CancelIoEx on the stdin handle; works when stdin has been
+//      redirected to a pipe/file (e.g. `wine px4.exe < script`).
+static void kick_stdin_reader()
+{
+	HANDLE stdin_h = GetStdHandle(STD_INPUT_HANDLE);
+
+	if (stdin_h == INVALID_HANDLE_VALUE || stdin_h == nullptr) {
+		return;
+	}
+
+	INPUT_RECORD rec[2] = {};
+	rec[0].EventType = KEY_EVENT;
+	rec[0].Event.KeyEvent.bKeyDown = TRUE;
+	rec[0].Event.KeyEvent.wRepeatCount = 1;
+	rec[0].Event.KeyEvent.wVirtualKeyCode = VK_RETURN;
+	rec[0].Event.KeyEvent.uChar.UnicodeChar = L'\n';
+	rec[1] = rec[0];
+	rec[1].Event.KeyEvent.bKeyDown = FALSE;
+
+	DWORD written = 0;
+	WriteConsoleInputW(stdin_h, rec, 2, &written);
+	CancelIoEx(stdin_h, nullptr);
+}
+
+static void prepare_console_for_host_shell()
+{
+	px4_windows_restore_console_modes();
+	px4_windows_discard_pending_input();
+	px4_windows_restore_console_modes();
+}
+
+static BOOL WINAPI px4_console_ctrl_handler(DWORD ctrl_type)
+{
+	switch (ctrl_type) {
+	case CTRL_C_EVENT:
+	case CTRL_BREAK_EVENT:
+	case CTRL_CLOSE_EVENT:
+	case CTRL_LOGOFF_EVENT:
+	case CTRL_SHUTDOWN_EVENT:
+		sig_int_handler(SIGINT);
+		kick_stdin_reader();
+		prepare_console_for_host_shell();
+		px4_windows_release_console();
+		return TRUE;
+
+	default:
+		return FALSE;
+	}
+}
+#endif
 
 
 #ifdef __PX4_SITL_MAIN_OVERRIDE
@@ -416,6 +487,19 @@ int main(int argc, char **argv)
 
 		std::string cmd("shutdown");
 		px4_daemon::Pxh::process_line(cmd, true);
+#ifdef __PX4_WINDOWS
+		// The shutdown command runs asynchronously on the worker queue. While
+		// waiting for the worker to terminate the process, keep restoring and
+		// draining stdin so Enters typed during shutdown do not leak back into
+		// the host Linux shell once Wine returns.
+		for (int i = 0; i < 120; ++i) {
+			prepare_console_for_host_shell();
+			Sleep(50);
+		}
+
+		px4_windows_release_console();
+		px4_windows_exit(0);
+#endif
 	}
 
 	return PX4_OK;
@@ -505,6 +589,14 @@ int create_dirs()
 
 void register_sig_handler()
 {
+#ifdef __PX4_WINDOWS
+	// MinGW's signal.h has no sigaction. SIGPIPE does not exist on
+	// Windows (closed sockets return WSAECONNRESET instead). Fall back
+	// to plain signal() for SIGINT/SIGTERM.
+	signal(SIGINT,  sig_int_handler);
+	signal(SIGTERM, sig_int_handler);
+	SetConsoleCtrlHandler(px4_console_ctrl_handler, TRUE);
+#else
 	// SIGINT
 	struct sigaction sig_int {};
 	sig_int.sa_handler = sig_int_handler;
@@ -525,13 +617,24 @@ void register_sig_handler()
 
 	sigaction(SIGTERM, &sig_int, nullptr);
 	sigaction(SIGPIPE, &sig_pipe, nullptr);
+#endif // __PX4_WINDOWS
 }
 
 void sig_int_handler(int sig_num)
 {
+	(void)sig_num;
+
+	if (_shutdown_started) {
+		return;
+	}
+
+	_shutdown_started = 1;
 	fflush(stdout);
 	printf("\nPX4 Exiting...\n");
 	fflush(stdout);
+#ifdef __PX4_WINDOWS
+	prepare_console_for_host_shell();
+#endif
 	uorb_shutdown();
 	px4_daemon::Pxh::stop();
 	_exit_requested = true;
@@ -553,7 +656,7 @@ std::string get_absolute_binary_path(const std::string &argv0)
 {
 	// On Linux we could also use readlink("/proc/self/exe", buf, bufsize) to get the absolute path
 
-	std::size_t last_slash = argv0.find_last_of('/');
+	std::size_t last_slash = argv0.find_last_of("/\\");
 
 	if (last_slash == std::string::npos) {
 		// either relative path or in PATH (PATH is ignored here)
@@ -562,8 +665,9 @@ std::string get_absolute_binary_path(const std::string &argv0)
 
 	std::string base = argv0.substr(0, last_slash);
 
-	if (base.length() > 0 && base[0] == '/') {
-		// absolute path
+	if (is_absolute_path(base)) {
+		// Absolute POSIX path, or an absolute Windows path when running the
+		// Windows backend natively / under Wine.
 		return base;
 	}
 
@@ -574,62 +678,13 @@ std::string get_absolute_binary_path(const std::string &argv0)
 int run_startup_script(const std::string &commands_file, const std::string &absolute_binary_path,
 		       int instance)
 {
-	std::string shell_command("/bin/sh ");
+	int ret = px4::run_shell_script(commands_file, absolute_binary_path, instance);
 
-	shell_command += commands_file + ' ' + std::to_string(instance);
-
-	// Update the PATH variable to include the absolute_binary_path
-	// (required for the px4-alias.sh script and px4-* commands).
-	// They must be within the same directory as the px4 binary
-	const char *path_variable = "PATH";
-	std::string updated_path = absolute_binary_path;
-	const char *path = getenv(path_variable);
-
-	if (path) {
-		std::string spath = path;
-
-		// Check if absolute_binary_path already in PATH
-		bool already_in_path = false;
-		std::size_t current, previous = 0;
-		current = spath.find(':');
-
-		while (current != std::string::npos) {
-			if (spath.substr(previous, current - previous) == absolute_binary_path) {
-				already_in_path = true;
-			}
-
-			previous = current + 1;
-			current = spath.find(':', previous);
-		}
-
-		if (spath.substr(previous, current - previous) == absolute_binary_path) {
-			already_in_path = true;
-		}
-
-		if (!already_in_path) {
-			// Prepend to path to prioritize PX4 commands over potentially already installed PX4 commands.
-			updated_path = updated_path + ":" + path;
-			setenv(path_variable, updated_path.c_str(), 1);
-		}
-	}
-
-
-	PX4_INFO("startup script: %s", shell_command.c_str());
-
-	int ret = 0;
-
-	if (!shell_command.empty()) {
-		ret = system(shell_command.c_str());
-
-		if (ret == 0) {
-			PX4_INFO("Startup script returned successfully");
-
-		} else {
-			PX4_ERR("Startup script returned with return value: %d", ret);
-		}
+	if (ret == 0) {
+		PX4_INFO("Startup script returned successfully");
 
 	} else {
-		PX4_INFO("Startup script empty");
+		PX4_ERR("Startup script returned with return value: %d", ret);
 	}
 
 	return ret;
@@ -743,11 +798,45 @@ static std::string file_basename(std::string const &pathname)
 	struct MatchPathSeparator {
 		bool operator()(char ch) const
 		{
-			return ch == '/';
+			return is_path_separator(ch);
 		}
 	};
 	return std::string(std::find_if(pathname.rbegin(), pathname.rend(),
 					MatchPathSeparator()).base(), pathname.end());
+}
+
+static bool is_path_separator(char ch)
+{
+	return ch == '/' || ch == '\\';
+}
+
+static bool is_absolute_path(const std::string &path)
+{
+	if (path.empty()) {
+		return false;
+	}
+
+	if (path[0] == '/') {
+		return true;
+	}
+
+#ifdef __PX4_WINDOWS
+	const bool drive_letter = path.length() >= 3
+				  && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'))
+				  && path[1] == ':'
+				  && is_path_separator(path[2]);
+
+	if (drive_letter) {
+		return true;
+	}
+
+	// UNC paths begin with two separators, for example \\server\share.
+	if (path.length() >= 2 && is_path_separator(path[0]) && is_path_separator(path[1])) {
+		return true;
+	}
+#endif
+
+	return false;
 }
 
 bool dir_exists(const std::string &path)
