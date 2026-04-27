@@ -45,7 +45,11 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#ifdef __PX4_WINDOWS
+#include <netinet/in.h>
+#else
 #include <sys/un.h>
+#endif
 #include <unistd.h>
 
 #include <string>
@@ -56,6 +60,24 @@
 namespace px4_daemon
 {
 
+#ifdef __PX4_WINDOWS
+namespace
+{
+bool ends_with_exe_suffix(const std::string &arg)
+{
+	if (arg.size() < 4) {
+		return false;
+	}
+
+	const std::string suffix = arg.substr(arg.size() - 4);
+	return suffix == ".exe" || suffix == ".EXE"
+	       || suffix == ".Exe" || suffix == ".eXe"
+	       || suffix == ".exE" || suffix == ".EXe"
+	       || suffix == ".eXE" || suffix == ".ExE";
+}
+} // namespace
+#endif
+
 Client::Client(int instance_id) :
 	_fd(-1),
 	_instance_id(instance_id)
@@ -64,6 +86,26 @@ Client::Client(int instance_id) :
 int
 Client::process_args(const int argc, const char **argv)
 {
+#ifdef __PX4_WINDOWS
+	const uint16_t port = get_socket_port(_instance_id);
+
+	_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (_fd < 0) {
+		PX4_ERR("error creating socket");
+		return -1;
+	}
+
+	sockaddr_in addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(port);
+
+	if (connect(_fd, (sockaddr *)&addr, sizeof(addr)) < 0) {
+		PX4_ERR("error connecting to 127.0.0.1:%u: %s", port, strerror(errno));
+		return -1;
+	}
+#else
 	std::string sock_path = get_socket_path(_instance_id);
 
 	_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -81,6 +123,7 @@ Client::process_args(const int argc, const char **argv)
 		PX4_ERR("error connecting to socket: %s", strerror(errno));
 		return -1;
 	}
+#endif
 
 	int ret = _send_cmds(argc, argv);
 
@@ -98,7 +141,18 @@ Client::_send_cmds(const int argc, const char **argv)
 	std::string cmd_buf;
 
 	for (int i = 0; i < argc; ++i) {
-		cmd_buf += argv[i];
+		std::string arg = argv[i];
+
+#ifdef __PX4_WINDOWS
+		// Client executables are real .exe files on Windows, not POSIX
+		// symlinks. The pxh command namespace remains extensionless
+		// ("commander", "shutdown", ...), so strip only argv[0].
+		if (i == 0 && ends_with_exe_suffix(arg)) {
+			arg.resize(arg.size() - 4);
+		}
+#endif
+
+		cmd_buf += arg;
 
 		if (i + 1 != argc) {
 			// TODO: Use '\0' as argument separator (and parse this server-side as well),
@@ -114,10 +168,13 @@ Client::_send_cmds(const int argc, const char **argv)
 	const char *buf = cmd_buf.data();
 
 	while (n > 0) {
-		int n_sent = write(_fd, buf, n);
+		// send() instead of write() so the same code path works with AF_UNIX
+		// on POSIX and AF_INET SOCKETs on Windows — write() does not operate
+		// on WinSock SOCKET handles.
+		int n_sent = send(_fd, buf, n, 0);
 
 		if (n_sent < 0) {
-			PX4_ERR("write() failed: %s", strerror(errno));
+			PX4_ERR("send() failed: %s", strerror(errno));
 			return -1;
 		}
 
@@ -138,7 +195,7 @@ Client::_listen()
 	// by another byte, we don't output it yet, until we know whether it was
 	// the end of the stream or not.
 	while (true) {
-		int n_read = read(_fd, buffer + n_buffer_used, sizeof buffer - n_buffer_used);
+		int n_read = recv(_fd, buffer + n_buffer_used, sizeof buffer - n_buffer_used, 0);
 
 		if (n_read < 0) {
 			PX4_ERR("unable to read from socket");

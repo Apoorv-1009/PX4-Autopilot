@@ -49,7 +49,11 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#ifdef __PX4_WINDOWS
+#include <netinet/in.h>
+#else
 #include <sys/un.h>
+#endif
 #include <vector>
 
 #include <px4_platform_common/log.h>
@@ -59,6 +63,101 @@
 
 namespace px4_daemon
 {
+
+namespace
+{
+
+struct ClientThreadArgs {
+	int client_fd;
+	FILE *thread_stdout;
+#ifdef __PX4_WINDOWS
+	int stdout_read_fd;
+#endif
+};
+
+#ifdef __PX4_WINDOWS
+struct StdoutRelayArgs {
+	int stdout_read_fd;
+	int client_fd;
+};
+
+static void *stdout_relay_trampoline(void *arg)
+{
+	StdoutRelayArgs *relay_args = static_cast<StdoutRelayArgs *>(arg);
+	char buffer[1024];
+
+	while (true) {
+		const ssize_t n_read = read(relay_args->stdout_read_fd, buffer, sizeof(buffer));
+
+		if (n_read <= 0) {
+			break;
+		}
+
+		const char *buf = buffer;
+		ssize_t remaining = n_read;
+
+		while (remaining > 0) {
+			const int n_sent = send((SOCKET)relay_args->client_fd, buf, (int)remaining, 0);
+
+			if (n_sent <= 0) {
+				close(relay_args->stdout_read_fd);
+				delete relay_args;
+				return nullptr;
+			}
+
+			buf += n_sent;
+			remaining -= n_sent;
+		}
+	}
+
+	close(relay_args->stdout_read_fd);
+	delete relay_args;
+	return nullptr;
+}
+#endif // __PX4_WINDOWS
+
+static ssize_t socket_read(int fd, char *buffer, size_t buffer_size)
+{
+#ifdef __PX4_WINDOWS
+	const int n_read = recv((SOCKET)fd, buffer, (int)buffer_size, 0);
+
+	if (n_read == SOCKET_ERROR) {
+		return -1;
+	}
+
+	return n_read;
+#else
+	return read(fd, buffer, buffer_size);
+#endif
+}
+
+static bool is_shutdown_command(const std::string &cmd)
+{
+	const std::string whitespace{" \t\r\n"};
+	const std::size_t command_start = cmd.find_first_not_of(whitespace);
+
+	if (command_start == std::string::npos) {
+		return false;
+	}
+
+	const std::size_t command_end = cmd.find_first_of(whitespace, command_start);
+	const std::size_t command_length = (command_end == std::string::npos) ? std::string::npos : command_end - command_start;
+	return cmd.compare(command_start, command_length, "shutdown") == 0;
+}
+
+} // namespace
+
+#ifdef __PX4_WINDOWS
+static SOCKET poll_socket(int fd)
+{
+	return static_cast<SOCKET>(fd);
+}
+#else
+static int poll_socket(int fd)
+{
+	return fd;
+}
+#endif
 
 Server *Server::_instance = nullptr;
 
@@ -77,6 +176,34 @@ Server::~Server()
 int
 Server::start()
 {
+#ifdef __PX4_WINDOWS
+	const uint16_t port = get_socket_port(_instance_id);
+
+	_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (_fd < 0) {
+		PX4_ERR("error creating socket");
+		return -1;
+	}
+
+	// Avoid EADDRINUSE when a prior instance left the port in TIME_WAIT.
+	int opt = 1;
+	setsockopt(_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+
+	sockaddr_in addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons(port);
+
+	if (bind(_fd, (sockaddr *)&addr, sizeof(addr)) < 0) {
+		// Winsock bind() does not set errno on failure — the error code
+		// lives in WSAGetLastError(). Reading errno returns whatever
+		// stale value the CRT had (often 0 → "Success"), which is
+		// useless. Report the winsock code directly.
+		PX4_ERR("error binding socket 127.0.0.1:%u, WSA error = %d", port, WSAGetLastError());
+		return -1;
+	}
+#else
 	std::string sock_path = get_socket_path(_instance_id);
 
 	// Delete socket in case it exists already.
@@ -97,6 +224,7 @@ Server::start()
 		PX4_ERR("error binding socket %s, error = %s", sock_path.c_str(), strerror(errno));
 		return -1;
 	}
+#endif
 
 	if (listen(_fd, 10) < 0) {
 		PX4_ERR("error listening to socket: %s", strerror(errno));
@@ -136,11 +264,78 @@ Server::_server_main()
 		return;
 	}
 
+#ifdef __PX4_WINDOWS
+	while (true) {
+		pollfd listen_fd {poll_socket(_fd), POLLIN, 0};
+		int n_ready = poll(&listen_fd, 1, -1);
+
+		if (n_ready < 0) {
+			if (errno != EINTR) {
+				PX4_ERR("poll() failed: %s", strerror(errno));
+				break;
+			}
+
+			continue;
+		}
+
+		if (!(listen_fd.revents & POLLIN)) {
+			continue;
+		}
+
+		const int client = accept(_fd, nullptr, nullptr);
+
+		if (client == -1) {
+			PX4_ERR("failed to accept client: %s", strerror(errno));
+			continue;
+		}
+
+		int stdout_pipe[2] {-1, -1};
+
+		if (pipe(stdout_pipe) != 0) {
+			PX4_ERR("could not create stdout pipe for new thread");
+			closesocket((SOCKET)client);
+			continue;
+		}
+
+		FILE *thread_stdout = fdopen(stdout_pipe[1], "wb");
+
+		if (thread_stdout == nullptr) {
+			PX4_ERR("could not open stdout pipe for new thread");
+			close(stdout_pipe[0]);
+			close(stdout_pipe[1]);
+			closesocket((SOCKET)client);
+			continue;
+		}
+
+		// Windows sockets are WinSock handles, not CRT file descriptors, so
+		// they cannot be used with fdopen()/FILE*. PX4 command output still
+		// expects FILE*, therefore each client gets a real CRT pipe and the
+		// handler relays that pipe to the socket after command execution.
+		setvbuf(thread_stdout, nullptr, _IOLBF, BUFSIZ);
+
+		ClientThreadArgs *thread_args = new ClientThreadArgs {client, thread_stdout, stdout_pipe[0]};
+		pthread_t thread {};
+		ret = pthread_create(&thread, nullptr, Server::_handle_client, thread_args);
+
+		if (ret != 0) {
+			PX4_ERR("could not start pthread (%i)", ret);
+			fclose(thread_stdout);
+			close(stdout_pipe[0]);
+			closesocket((SOCKET)client);
+			delete thread_args;
+			continue;
+		}
+
+		pthread_detach(thread);
+	}
+
+	closesocket((SOCKET)_fd);
+#else
 	// The list of file descriptors to watch.
 	std::vector<pollfd> poll_fds;
 
 	// Watch the listening socket for incoming connections.
-	poll_fds.push_back(pollfd {_fd, POLLIN, 0});
+	poll_fds.push_back(pollfd {poll_socket(_fd), POLLIN, 0});
 
 	// The list of FILE pointers that we'll need to fclose().
 	// stdouts[i] corresponds to poll_fds[i+1].
@@ -181,20 +376,22 @@ Server::_server_main()
 				setvbuf(thread_stdout, nullptr, _IOLBF, BUFSIZ);
 
 				// Start a new thread to handle the client.
+				ClientThreadArgs *thread_args = new ClientThreadArgs {client, thread_stdout};
 				pthread_t *thread = &_fd_to_thread[client];
-				ret = pthread_create(thread, nullptr, Server::_handle_client, thread_stdout);
+				ret = pthread_create(thread, nullptr, Server::_handle_client, thread_args);
 
 				if (ret != 0) {
 					PX4_ERR("could not start pthread (%i)", ret);
 					_fd_to_thread.erase(client);
 					fclose(thread_stdout);
+					delete thread_args;
 
 				} else {
 					// We won't join the thread, so detach to automatically release resources at its end
 					pthread_detach(*thread);
 
 					// Start listening for the client hanging up.
-					poll_fds.push_back(pollfd {client, POLLHUP, 0});
+					poll_fds.push_back(pollfd {poll_socket(client), POLLHUP, 0});
 
 					// Remember the FILE *, so we can fclose() it later.
 					stdouts.push_back(thread_stdout);
@@ -227,16 +424,20 @@ Server::_server_main()
 		_unlock();
 	}
 
+#ifndef __PX4_WINDOWS
 	std::string sock_path = get_socket_path(_instance_id);
 	unlink(sock_path.c_str());
+#endif
 	close(_fd);
+#endif // __PX4_WINDOWS
 }
 
 void
 *Server::_handle_client(void *arg)
 {
-	FILE *out = (FILE *)arg;
-	int fd = fileno(out);
+	ClientThreadArgs *client_args = static_cast<ClientThreadArgs *>(arg);
+	FILE *out = client_args->thread_stdout;
+	int fd = client_args->client_fd;
 
 	// Read until the end of the incoming stream.
 	std::string cmd;
@@ -244,10 +445,18 @@ void
 	while (true) {
 		size_t n = cmd.size();
 		cmd.resize(n + 1024);
-		ssize_t n_read = read(fd, &cmd[n], cmd.size() - n);
+		ssize_t n_read = socket_read(fd, &cmd[n], cmd.size() - n);
 
 		if (n_read <= 0) {
+#ifdef __PX4_WINDOWS
+			fclose(out);
+			close(client_args->stdout_read_fd);
+			closesocket((SOCKET)fd);
+			delete client_args;
+#else
+			delete client_args;
 			_cleanup(fd);
+#endif
 			return nullptr;
 		}
 
@@ -260,7 +469,15 @@ void
 	}
 
 	if (cmd.size() < 2) {
+#ifdef __PX4_WINDOWS
+		fclose(out);
+		close(client_args->stdout_read_fd);
+		closesocket((SOCKET)fd);
+		delete client_args;
+#else
+		delete client_args;
 		_cleanup(fd);
+#endif
 		return nullptr;
 	}
 
@@ -279,6 +496,45 @@ void
 		(void)pthread_setspecific(_instance->_key, (void *)thread_data_ptr);
 	}
 
+#ifdef __PX4_WINDOWS
+	StdoutRelayArgs *relay_args = new StdoutRelayArgs {client_args->stdout_read_fd, fd};
+	pthread_t relay_thread {};
+	const bool relay_started = (pthread_create(&relay_thread, nullptr, stdout_relay_trampoline, relay_args) == 0);
+
+	if (!relay_started) {
+		PX4_ERR("could not start stdout relay thread");
+		close(client_args->stdout_read_fd);
+		delete relay_args;
+	}
+#endif
+
+	if (is_shutdown_command(cmd)) {
+		// shutdown exits the daemon process asynchronously. Reply before
+		// requesting shutdown so px4-shutdown gets the normal success marker
+		// instead of racing process teardown and reporting 255.
+		char buf[2] = {0, 0};
+		(void)fwrite(buf, sizeof buf, 1, out);
+		fflush(out);
+
+#ifdef __PX4_WINDOWS
+		fclose(out);
+
+		if (relay_started) {
+			pthread_join(relay_thread, nullptr);
+		}
+
+		shutdown(fd, SHUT_RDWR);
+		closesocket((SOCKET)fd);
+		delete client_args;
+#else
+		delete client_args;
+		_cleanup(fd);
+#endif
+
+		(void)Pxh::process_line(cmd, true);
+		return nullptr;
+	}
+
 	// Run the actual command.
 	int retval = Pxh::process_line(cmd, true);
 
@@ -292,7 +548,20 @@ void
 	// Flush the FILE*'s buffer before we shut down the connection.
 	fflush(out);
 
+#ifdef __PX4_WINDOWS
+	fclose(out);
+
+	if (relay_started) {
+		pthread_join(relay_thread, nullptr);
+	}
+
+	shutdown(fd, SHUT_RDWR);
+	closesocket((SOCKET)fd);
+	delete client_args;
+#else
+	delete client_args;
 	_cleanup(fd);
+#endif
 	return nullptr;
 }
 

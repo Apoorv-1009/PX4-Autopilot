@@ -37,11 +37,21 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace px4_daemon
 {
 
+#ifdef __PX4_WINDOWS
+// Windows: AF_INET TCP loopback. AF_UNIX was introduced in Windows 10 1803
+// (WinSock2) and in principle would work, but Wine (used for SITL CI) did
+// not support AF_UNIX until 7.x — 6.x still returns WSAEAFNOSUPPORT. TCP
+// loopback sidesteps the portability gap without changing the rest of the
+// daemon protocol.
+uint16_t get_socket_port(int instance_id);
+#else
 std::string get_socket_path(int instance_id);
+#endif
 
 } // namespace px4_daemon
