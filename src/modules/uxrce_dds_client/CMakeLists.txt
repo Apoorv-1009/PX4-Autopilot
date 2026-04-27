@@ -43,7 +43,15 @@ else()
 
 	# If a toolchain file is given, explicitly define its path when building the Micro-XRCE-DDS-CLient
 	if(CMAKE_TOOLCHAIN_FILE MATCHES "cmake$")
-		set(microxrceddsclient_toolchain ${CMAKE_TOOLCHAIN_FILE})
+		# CMake accepts relative toolchain paths on the command line (resolved
+		# against the source dir) but ExternalProject runs in its own working
+		# directory, so we have to hand down an absolute path.
+		if(NOT IS_ABSOLUTE "${CMAKE_TOOLCHAIN_FILE}")
+			get_filename_component(microxrceddsclient_toolchain
+				"${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE BASE_DIR "${PX4_SOURCE_DIR}")
+		else()
+			set(microxrceddsclient_toolchain ${CMAKE_TOOLCHAIN_FILE})
+		endif()
 	elseif(CMAKE_TOOLCHAIN_FILE)
 		set(microxrceddsclient_toolchain ${PX4_SOURCE_DIR}/platforms/${PX4_PLATFORM}/cmake/${CMAKE_TOOLCHAIN_FILE}.cmake)
 	endif()
@@ -75,6 +83,10 @@ else()
 			-DCMAKE_C_FLAGS:STRING=${c_flags_with_includes}
 			-DCMAKE_CXX_FLAGS:STRING=${cxx_flags_with_includes}
 			-DCMAKE_EXE_LINKER_FLAGS:STRING=${CMAKE_EXE_LINKER_FLAGS}
+			# Forward the generator + make program so nested superbuilds
+			# (microcdr, uclient) can configure themselves without a second
+			# round of auto-detection.
+			-DCMAKE_MAKE_PROGRAM:FILEPATH=${CMAKE_MAKE_PROGRAM}
 			-DUCLIENT_PIC:BOOL=OFF
 			-DUCLIENT_PROFILE_TCP:BOOL=OFF
 			-DUCLIENT_PROFILE_UDP:BOOL=ON
@@ -83,7 +95,10 @@ else()
 			-DUCLIENT_PROFILE_CUSTOM_TRANSPORT:BOOL=OFF
 			-DUCLIENT_PROFILE_MULTITHREAD:BOOL=OFF
 			-DUCLIENT_PROFILE_SHARED_MEMORY:BOOL=OFF
-			-DUCLIENT_PLATFORM_POSIX:BOOL=ON
+			# Pick the right transport platform: on Windows let the uclient
+			# CMakeLists auto-detect (UCLIENT_PLATFORM_WINDOWS) rather than
+			# forcing POSIX — its POSIX transport pulls in <poll.h>.
+			-DUCLIENT_PLATFORM_POSIX:BOOL=$<IF:$<OR:$<BOOL:${WIN32}>,$<BOOL:${MINGW}>>,OFF,ON>
 			-DUCLIENT_BUILD_MICROCDR:BOOL=ON
 			-DCMAKE_INSTALL_PREFIX:PATH=${CMAKE_CURRENT_BINARY_DIR}
 			-DCMAKE_PREFIX_PATH:PATH=${CMAKE_CURRENT_BINARY_DIR}

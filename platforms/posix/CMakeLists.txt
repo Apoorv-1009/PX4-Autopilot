@@ -26,10 +26,35 @@ add_definitions(-DPX4_SOURCE_DIR="${PX4_SOURCE_DIR}" -DPX4_BINARY_DIR="${PX4_BIN
 # PX4_INSTALL_PREFIX is set by cmake/package.cmake after this file is processed.
 # It is passed via target_compile_definitions on the px4 target from package.cmake.
 
-add_executable(px4
+if(WIN32)
+	include(cmake/windows.cmake)
+endif()
+
+set(_px4_main_sources
 	src/px4/common/main.cpp
 	apps.cpp
-	)
+)
+
+if(WIN32)
+	px4_posix_windows_append_sources(_px4_main_sources)
+else()
+	list(APPEND _px4_main_sources src/px4/common/shell_posix.cpp)
+endif()
+
+if(WIN32)
+	px4_posix_windows_configure_link_templates()
+endif()
+
+add_executable(px4 ${_px4_main_sources})
+
+set(_px4_posix_math_libraries)
+if(NOT MSVC)
+	list(APPEND _px4_posix_math_libraries m)
+endif()
+
+if(WIN32)
+	px4_posix_windows_configure_target(px4)
+endif()
 
 if (BUILD_TESTING)
 	# Build mavlink fuzz tests. These run other modules and thus cannot be a functional/unit test
@@ -44,7 +69,7 @@ if (BUILD_TESTING)
 	target_link_libraries(mavlink_fuzz_tests
 		PRIVATE
 			${module_libraries}
-			m
+			${_px4_posix_math_libraries}
 			parameters
 	)
 	target_compile_options(mavlink_fuzz_tests
@@ -65,19 +90,23 @@ endif()
 target_link_libraries(px4
 	PRIVATE
 		${module_libraries}
-		m
+		${_px4_posix_math_libraries}
 		parameters
 )
 
-if((NOT APPLE) AND (NOT ANDROID))
+if((NOT APPLE) AND (NOT ANDROID) AND (NOT WIN32))
 	target_link_libraries(px4 PRIVATE rt)
 endif()
 
-if(NOT ANDROID)
+if((NOT ANDROID) AND (NOT WIN32))
 	target_link_libraries(px4 PRIVATE pthread)
 endif()
 
 target_link_libraries(px4 PRIVATE uORB)
+
+if(WIN32)
+	px4_posix_windows_link_libraries(px4)
+endif()
 
 #=============================================================================
 # install

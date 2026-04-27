@@ -42,55 +42,75 @@
 #
 function(px4_add_common_flags)
 
-	add_compile_options(
-		-g # always build debug symbols
+	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
+		add_compile_options(
+			/MP
+			/Zi
+			/EHsc
+			/bigobj
+			/permissive-
+			/utf-8
+			/FIvisibility.h
+			/W3
 
-		# optimization options
-		-fdata-sections
-		-ffunction-sections
-		-fomit-frame-pointer
-		-fmerge-all-constants
-
-		#-funsafe-math-optimizations # Enables -fno-signed-zeros, -fno-trapping-math, -fassociative-math and -freciprocal-math
-		-fno-signed-zeros	# Allow optimizations for floating-point arithmetic that ignore the signedness of zero
-		-fno-trapping-math	# Compile code assuming that floating-point operations cannot generate user-visible traps
-		#-fassociative-math	# Allow re-association of operands in series of floating-point operations
-		-freciprocal-math	# Allow the reciprocal of a value to be used instead of dividing by the value if this enables optimizations
-
-		-fno-math-errno		# Do not set errno after calling math functions that are executed with a single instruction, e.g., sqrt
-
-		-fno-strict-aliasing
-
-		# visibility
-		-fvisibility=hidden
-		-include visibility.h
-
-		# Warnings
-		-Wall
-		-Wextra
-		-Werror
-
-		-Warray-bounds
-		-Wcast-align
-		-Wdisabled-optimization
-		-Wdouble-promotion
-		-Wfatal-errors
-		-Wfloat-equal
-		-Wformat-security
-		-Winit-self
-		-Wlogical-op
-		-Wpointer-arith
-		-Wshadow
-		-Wuninitialized
-		-Wunknown-pragmas
-		-Wunused-variable
-
-		# disabled warnings
-		-Wno-missing-field-initializers
-		-Wno-missing-include-dirs # TODO: fix and enable
-		-Wno-unused-parameter
-
+			/wd4005 # macro redefinition in Windows/POSIX compatibility headers
+			/wd4068 # unknown pragma from GCC-oriented third-party code
+			/wd4244 # narrowing conversion warnings are pervasive in PX4 SITL
+			/wd4267 # size_t to int narrowing in POSIX-style APIs
+			/wd4305 # truncation from double to float constants
+			/wd4996 # POSIX/CRT compatibility names are intentional
 		)
+	else()
+		add_compile_options(
+			-g # always build debug symbols
+
+			# optimization options
+			-fdata-sections
+			-ffunction-sections
+			-fomit-frame-pointer
+			-fmerge-all-constants
+
+			#-funsafe-math-optimizations # Enables -fno-signed-zeros, -fno-trapping-math, -fassociative-math and -freciprocal-math
+			-fno-signed-zeros	# Allow optimizations for floating-point arithmetic that ignore the signedness of zero
+			-fno-trapping-math	# Compile code assuming that floating-point operations cannot generate user-visible traps
+			#-fassociative-math	# Allow re-association of operands in series of floating-point operations
+			-freciprocal-math	# Allow the reciprocal of a value to be used instead of dividing by the value if this enables optimizations
+
+			-fno-math-errno		# Do not set errno after calling math functions that are executed with a single instruction, e.g., sqrt
+
+			-fno-strict-aliasing
+
+			# visibility
+			-fvisibility=hidden
+			-include visibility.h
+
+			# Warnings
+			-Wall
+			-Wextra
+			-Werror
+
+			-Warray-bounds
+			-Wcast-align
+			-Wdisabled-optimization
+			-Wdouble-promotion
+			-Wfatal-errors
+			-Wfloat-equal
+			-Wformat-security
+			-Winit-self
+			-Wlogical-op
+			-Wpointer-arith
+			-Wshadow
+			-Wuninitialized
+			-Wunknown-pragmas
+			-Wunused-variable
+
+			# disabled warnings
+			-Wno-missing-field-initializers
+			-Wno-missing-include-dirs # TODO: fix and enable
+			-Wno-unused-parameter
+
+			)
+	endif()
 
 	# compiler specific flags
 	if (("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang") OR ("${CMAKE_CXX_COMPILER_ID}" MATCHES "AppleClang"))
@@ -136,18 +156,18 @@ function(px4_add_common_flags)
 
 	elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Intel")
 		message(FATAL_ERROR "Intel compiler not yet supported")
-	elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-		message(FATAL_ERROR "MS compiler not yet supported")
 	endif()
 
 	# C only flags
 	set(c_flags)
-	list(APPEND c_flags
-		-fno-common
+	if (NOT ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC"))
+		list(APPEND c_flags
+			-fno-common
 
-		-Wnested-externs
-		-Wstrict-prototypes
-	)
+			-Wnested-externs
+			-Wstrict-prototypes
+		)
+	endif()
 	foreach(flag ${c_flags})
 		add_compile_options($<$<COMPILE_LANGUAGE:C>:${flag}>)
 	endforeach()
@@ -155,14 +175,20 @@ function(px4_add_common_flags)
 
 	# CXX only flags
 	set(cxx_flags)
-	list(APPEND cxx_flags
-		-Wreorder
+	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
+		list(APPEND cxx_flags
+			/Zc:__cplusplus
+		)
+	else()
+		list(APPEND cxx_flags
+			-Wreorder
 
-		# disabled warnings
-		-Wno-overloaded-virtual # TODO: fix and remove
-	)
+			# disabled warnings
+			-Wno-overloaded-virtual # TODO: fix and remove
+		)
+	endif()
 
-	if((NOT BUILD_TESTING) AND (NOT PX4_CONFIG MATCHES "px4_sitl"))
+	if((NOT BUILD_TESTING) AND (NOT PX4_CONFIG MATCHES "px4_sitl") AND (NOT ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")))
 		list(APPEND cxx_flags
 			-fno-rtti
 		)

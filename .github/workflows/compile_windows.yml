@@ -1,0 +1,70 @@
+name: Windows SITL cross-build
+
+# Cross-compile px4_sitl_default for Windows x86_64 via MinGW-w64. This is
+# the regression gate for the platforms/posix Windows shim layer and
+# toolchain. The toolchain is resolved by bare name through
+# CMAKE_MODULE_PATH (extended by cmake/kconfig.cmake to include
+# platforms/posix/cmake).
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'stable'
+      - 'beta'
+      - 'release/**'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    branches:
+      - '**'
+    paths-ignore:
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows SITL (MinGW)
+    runs-on: ubuntu-24.04
+    env:
+      CMAKE_ARGS: -DCMAKE_TOOLCHAIN_FILE=Toolchain-mingw-w64-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install MinGW-w64 + PX4 base deps
+        run: |
+          sudo apt-get update
+          # The *-posix variants of gcc/g++ ship winpthreads which PX4
+          # needs for std::thread and pthread_*.
+          sudo apt-get install -y --no-install-recommends \
+              mingw-w64 \
+              g++-mingw-w64-x86-64-posix \
+              gcc-mingw-w64-x86-64-posix \
+              cmake ninja-build ccache \
+              python3 python3-pip python3-jinja2 python3-yaml \
+              python3-toml python3-numpy python3-packaging \
+              python3-jsonschema python3-future
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-windows-sitl
+          max-size: 500M
+
+      - name: Cross-build px4.exe
+        run: make px4_sitl_default
+
+      - name: Upload px4.exe artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: px4-sitl-windows-x86_64
+          path: build/px4_sitl_default/bin/px4.exe
+          if-no-files-found: error
+          retention-days: 14

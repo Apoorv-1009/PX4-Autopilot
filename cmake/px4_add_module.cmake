@@ -140,7 +140,19 @@ function(px4_add_module)
 		set_target_properties(${MODULE} PROPERTIES
 			PREFIX ""
 			SUFFIX ".px4mod"
+			# Co-locate the .px4mod with CMakeLists.txt on all platforms.
+			# CMake places SHARED libraries in the project-wide
+			# LIBRARY_OUTPUT_DIRECTORY on Linux, but on Windows it treats
+			# DLLs as RUNTIME artefacts and puts them at the top of the
+			# binary tree — diverging from the ctest test discovery
+			# layout (sitl_tests.cmake runs the dyn test with
+			# WORKING_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}).
+			LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+			RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 			)
+		if(WIN32)
+			set_target_properties(${MODULE} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+		endif()
 		target_link_libraries(${MODULE} PRIVATE px4)
 		if(APPLE)
 			# Postpone resolving symbols until loading time, which is the default on most systems, but not Mac.
