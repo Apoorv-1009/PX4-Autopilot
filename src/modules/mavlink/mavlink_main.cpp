@@ -803,7 +803,7 @@ void Mavlink::send_finish()
 
 		if (_src_addr_initialized) {
 # endif // CONFIG_NET
-			ret = sendto(_socket_fd, _buf, _buf_fill, 0, (struct sockaddr *)&_src_addr, sizeof(_src_addr));
+			ret = sendto(_socket_fd, (const char *)_buf, _buf_fill, 0, (struct sockaddr *)&_src_addr, sizeof(_src_addr));
 # if defined(CONFIG_NET)
 		}
 
@@ -818,7 +818,7 @@ void Mavlink::send_finish()
 
 			if (_broadcast_address_found && _buf_fill > 0) {
 
-				int bret = sendto(_socket_fd, _buf, _buf_fill, 0, (struct sockaddr *)&_bcast_addr, sizeof(_bcast_addr));
+				int bret = sendto(_socket_fd, (const char *)_buf, _buf_fill, 0, (struct sockaddr *)&_bcast_addr, sizeof(_bcast_addr));
 
 				if (bret <= 0) {
 					if (!_broadcast_failed_warned) {
@@ -980,7 +980,7 @@ void Mavlink::find_broadcast_address()
 
 		int broadcast_opt = 1;
 
-		if (setsockopt(_socket_fd, SOL_SOCKET, SO_BROADCAST, &broadcast_opt, sizeof(broadcast_opt)) < 0) {
+		if (setsockopt(_socket_fd, SOL_SOCKET, SO_BROADCAST, (const char *)&broadcast_opt, sizeof(broadcast_opt)) < 0) {
 			PX4_WARN("setting broadcast permission failed");
 		}
 
@@ -1035,7 +1035,7 @@ void Mavlink::init_udp()
 		.tv_usec = UDP_SEND_TIMEOUT_US
 	};
 
-	if (setsockopt(_socket_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+	if (setsockopt(_socket_fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv)) < 0) {
 		PX4_WARN("setting socket timeout failed: %s", strerror(errno));
 	}
 
@@ -3075,12 +3075,17 @@ Mavlink::start(int argc, char *argv[])
 	// between the starting task and the spawned
 	// task - start_helper() only returns
 	// when the started task exits.
-	px4_task_spawn_cmd("mavlink_main",
-			   SCHED_DEFAULT,
-			   SCHED_PRIORITY_DEFAULT,
-			   PX4_STACK_ADJUSTED(2896) + MAVLINK_NET_ADDED_STACK,
-			   (px4_main_t)&Mavlink::start_helper,
-			   (char *const *)argv);
+	const px4_task_t task_id = px4_task_spawn_cmd("mavlink_main",
+				   SCHED_DEFAULT,
+				   SCHED_PRIORITY_DEFAULT,
+				   PX4_STACK_ADJUSTED(2896) + MAVLINK_NET_ADDED_STACK,
+				   (px4_main_t)&Mavlink::start_helper,
+				   (char *const *)argv);
+
+	if (task_id < 0) {
+		PX4_ERR("task spawn failed: %d", task_id);
+		return PX4_ERROR;
+	}
 
 	// Ensure that this shell command
 	// does not return before the instance
@@ -3089,20 +3094,22 @@ Mavlink::start(int argc, char *argv[])
 	// this is effectively a lock on concurrent
 	// instance starting. XXX do a real lock.
 
-	// Sleep 500 us between each attempt
+	// Sleep 500 us between each attempt. This is a shell-side startup wait, so
+	// it must use wall time rather than simulated lockstep time.
 	const unsigned sleeptime = 500;
 
-	// Wait 100 ms max for the startup.
-	const unsigned limit = 100 * 1000 / sleeptime;
+	// Wait 10 s max for the startup.
+	const unsigned limit = 10 * 1000 * 1000 / sleeptime;
 
 	unsigned count = 0;
 
 	while (ic == Mavlink::instance_count() && count < limit) {
-		px4_usleep(sleeptime);
+		system_usleep(sleeptime);
 		count++;
 	}
 
 	if (ic == Mavlink::instance_count()) {
+		PX4_ERR("start timed out");
 		return PX4_ERROR;
 
 	} else {
