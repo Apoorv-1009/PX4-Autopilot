@@ -49,6 +49,11 @@
 #include <limits.h>
 #include <string.h>
 
+#if defined(__PX4_POSIX)
+#include <pthread.h>
+#include <unistd.h>
+#endif
+
 using namespace time_literals;
 
 namespace px4
@@ -274,8 +279,8 @@ WorkQueueManagerRun(int, char **)
 #elif defined(__PX4_POSIX)
 			// On posix system , the desired stacksize round to the nearest multiplier of the system pagesize
 			// It is a requirement of the  pthread_attr_setstacksize* function
-			const unsigned int page_size = sysconf(_SC_PAGESIZE);
-			const size_t stacksize_adj = math::max((int)PTHREAD_STACK_MIN, PX4_STACK_ADJUSTED(wq->stacksize));
+			const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+			const size_t stacksize_adj = math::max(static_cast<size_t>(PTHREAD_STACK_MIN), static_cast<size_t>(PX4_STACK_ADJUSTED(wq->stacksize)));
 			const size_t stacksize = (stacksize_adj + page_size - (stacksize_adj % page_size));
 #endif
 
@@ -304,15 +309,33 @@ WorkQueueManagerRun(int, char **)
 				PX4_ERR("getting sched param for %s failed (%i)", wq->name, ret_getschedparam);
 			}
 
-			// schedule policy FIFO
-			int ret_setschedpolicy = pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+			// schedule policy FIFO — fall back to SCHED_OTHER on platforms
+			// where SCHED_FIFO is not available to unprivileged threads
+			// (winpthreads on MinGW is one such case). The work queues
+			// still work correctly at SCHED_OTHER priority.
+			int sched_policy = SCHED_FIFO;
+			int ret_setschedpolicy = pthread_attr_setschedpolicy(&attr, sched_policy);
 
 			if (ret_setschedpolicy != 0) {
-				PX4_ERR("failed to set sched policy SCHED_FIFO (%i)", ret_setschedpolicy);
+				sched_policy = SCHED_OTHER;
+				ret_setschedpolicy = pthread_attr_setschedpolicy(&attr, sched_policy);
 			}
 
-			// priority
-			param.sched_priority = sched_priority;
+			if (ret_setschedpolicy != 0) {
+				PX4_ERR("failed to set sched policy (%i)", ret_setschedpolicy);
+			}
+
+			// priority — clamp to the policy's valid range, otherwise
+			// pthread_attr_setschedparam rejects the value and the
+			// thread ends up at whatever default the library picks.
+			const int max_prio = sched_get_priority_max(sched_policy);
+			const int min_prio = sched_get_priority_min(sched_policy);
+			int effective_prio = sched_priority;
+
+			if (effective_prio > max_prio) { effective_prio = max_prio; }
+			if (effective_prio < min_prio) { effective_prio = min_prio; }
+
+			param.sched_priority = effective_prio;
 			int ret_setschedparam = pthread_attr_setschedparam(&attr, &param);
 
 			if (ret_setschedparam != 0) {

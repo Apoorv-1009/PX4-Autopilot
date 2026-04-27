@@ -44,12 +44,24 @@
 #ifdef __EXPORT
 #  undef __EXPORT
 #endif
-#define __EXPORT __attribute__ ((visibility ("default")))
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define __EXPORT __declspec(dllexport)
+#else
+#  define __EXPORT __attribute__ ((visibility ("default")))
+#endif
 
 #ifdef __PRIVATE
 #  undef __PRIVATE
 #endif
-#define __PRIVATE __attribute__ ((visibility ("hidden")))
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define __PRIVATE
+#else
+#  define __PRIVATE __attribute__ ((visibility ("hidden")))
+#endif
+
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__attribute__)
+#  define __attribute__(x)
+#endif
 
 #ifdef __cplusplus
 #  define __BEGIN_DECLS		extern "C" {

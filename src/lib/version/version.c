@@ -300,8 +300,8 @@ uint32_t px4_board_version(void)
 
 uint32_t px4_os_version(void)
 {
-#if defined(__PX4_DARWIN) || defined(__PX4_CYGWIN) || defined(__PX4_QURT)
-	return 0; //TODO: implement version for Darwin, Cygwin, QuRT
+#if defined(__PX4_DARWIN) || defined(__PX4_CYGWIN) || defined(__PX4_QURT) || defined(__PX4_WINDOWS)
+	return 0; //TODO: implement version for Darwin, Cygwin, QuRT, Windows
 #elif defined(__PX4_LINUX)
 	struct utsname name;
 
@@ -348,6 +348,8 @@ const char *px4_os_name(void)
 	return "NuttX";
 #elif defined(__PX4_CYGWIN)
 	return "Cygwin";
+#elif defined(__PX4_WINDOWS)
+	return "Windows";
 #else
 # error "px4_os_name not implemented for current OS"
 #endif
