@@ -138,3 +138,117 @@ TEST(AttitudeControlTest, YawWeightScaling)
 	// THEN: no actuation (also no NAN)
 	EXPECT_EQ(rate_setpoint, Vector3f());
 }
+
+class AttitudeControlFeedforwardTest : public ::testing::Test
+{
+public:
+	AttitudeControlFeedforwardTest()
+	{
+		_attitude_control.setProportionalGain(Vector3f(6.5f, 6.5f, 2.8f), 0.4f);
+		_attitude_control.setRateLimit(Vector3f(10.f, 10.f, 10.f));
+	}
+
+	// Push a constant-rate ramp around the given body axis until the reference model is settled.
+	// First call uses dt < 0 to reset the model to the current sample (matches the wrapper's
+	// behaviour on the very first setpoint after boot).
+	Quatf rampSetpoint(const Vector3f &body_rate, float yawspeed_sp, int steps)
+	{
+		Quatf q_d;
+
+		for (int i = 0; i < steps; i++) {
+			q_d = q_d * Quatf(AxisAnglef(body_rate * kDt));
+			_attitude_control.setAttitudeSetpoint(q_d, yawspeed_sp, (i == 0) ? -1.f : kDt);
+		}
+
+		return q_d;
+	}
+
+	AttitudeControl _attitude_control;
+
+	static constexpr float kDt = 0.004f;                                    // 250 Hz setpoint rate
+	static constexpr float kOmegaN = AttitudeControl::kTiltFFNaturalFreq;   // 10 rad/s
+	static constexpr int kSettleSteps = 200;                                // ~ 8 / omega_n, well-settled
+};
+
+TEST_F(AttitudeControlFeedforwardTest, ConstantSetpointGivesNoFeedforward)
+{
+	// GIVEN: a constant tilted setpoint repeated with valid dt
+	const Quatf q_d(AxisAnglef(Vector3f(0.1f, 0.f, 0.f)));
+
+	for (int i = 0; i < kSettleSteps; i++) {
+		_attitude_control.setAttitudeSetpoint(q_d, 0.f, (i == 0) ? -1.f : kDt);
+	}
+
+	// WHEN: vehicle is at the setpoint (no error)
+	const Vector3f rate_setpoint = _attitude_control.update(q_d);
+
+	// THEN: rate setpoint is zero — non-moving SP gives a zero model rate output
+	EXPECT_NEAR(rate_setpoint.norm(), 0.f, 1e-3f);
+}
+
+TEST_F(AttitudeControlFeedforwardTest, RollRampProducesRollFeedforward)
+{
+	// GIVEN: a steady roll ramp, vehicle perfectly tracking
+	const float omega = 0.5f;
+	const Quatf q_d = rampSetpoint(Vector3f(omega, 0.f, 0.f), 0.f, kSettleSteps);
+
+	// WHEN: vehicle is at the setpoint (no error → P term = 0)
+	const Vector3f rate_setpoint = _attitude_control.update(q_d);
+
+	// THEN: the entire rate setpoint comes from the tilt FF and lies on the roll axis
+	EXPECT_NEAR(rate_setpoint(0), omega, 0.05f * omega);
+	EXPECT_NEAR(rate_setpoint(1), 0.f, 1e-3f);
+	EXPECT_NEAR(rate_setpoint(2), 0.f, 1e-3f);
+}
+
+TEST_F(AttitudeControlFeedforwardTest, PitchRampProducesPitchFeedforward)
+{
+	// GIVEN: a steady pitch ramp, vehicle perfectly tracking
+	const float omega = 0.5f;
+	const Quatf q_d = rampSetpoint(Vector3f(0.f, omega, 0.f), 0.f, kSettleSteps);
+
+	const Vector3f rate_setpoint = _attitude_control.update(q_d);
+
+	EXPECT_NEAR(rate_setpoint(0), 0.f, 1e-3f);
+	EXPECT_NEAR(rate_setpoint(1), omega, 0.05f * omega);
+	EXPECT_NEAR(rate_setpoint(2), 0.f, 1e-3f);
+}
+
+TEST_F(AttitudeControlFeedforwardTest, YawRampOnlyAnalyticalFeedforwardContributes)
+{
+	// GIVEN: a yaw ramp with the analytical yawspeed FF set to the same rate.
+	// Yaw rotation does not change the desired thrust direction, so the tilt
+	// reference model sees a constant input and produces zero output. The yaw FF
+	// thus comes solely from the analytical yaw_sp_move_rate path — no projection
+	// or double-counting needed because yaw never enters the model.
+	const float omega = 0.5f;
+	const Quatf q_d = rampSetpoint(Vector3f(0.f, 0.f, omega), omega, kSettleSteps);
+
+	const Vector3f rate_setpoint = _attitude_control.update(q_d);
+
+	EXPECT_NEAR(rate_setpoint(0), 0.f, 1e-3f);
+	EXPECT_NEAR(rate_setpoint(1), 0.f, 1e-3f);
+	EXPECT_NEAR(rate_setpoint(2), omega, 0.05f * omega);
+}
+
+TEST_F(AttitudeControlFeedforwardTest, FeedForwardDisabledSuppressesContribution)
+{
+	// GIVEN: a settled roll-ramp FF
+	const float omega = 0.5f;
+	const Quatf q_d = rampSetpoint(Vector3f(omega, 0.f, 0.f), 0.f, kSettleSteps);
+
+	// WHEN: FF is disabled (e.g. autotune active)
+	_attitude_control.setFeedForwardEnabled(false);
+	Vector3f rate_setpoint = _attitude_control.update(q_d);
+
+	// THEN: no FF applied even though the model still holds the ramp rate
+	EXPECT_NEAR(rate_setpoint.norm(), 0.f, 1e-3f);
+
+	// AND WHEN: re-enabled, the FF returns immediately (model state preserved)
+	_attitude_control.setFeedForwardEnabled(true);
+	rate_setpoint = _attitude_control.update(q_d);
+
+	EXPECT_NEAR(rate_setpoint(0), omega, 0.05f * omega);
+	EXPECT_NEAR(rate_setpoint(1), 0.f, 1e-3f);
+	EXPECT_NEAR(rate_setpoint(2), 0.f, 1e-3f);
+}

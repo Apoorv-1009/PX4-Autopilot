@@ -50,12 +50,18 @@
 
 #include <matrix/matrix/math.hpp>
 #include <mathlib/math/Limits.hpp>
+#include <mathlib/math/filter/second_order_reference_model.hpp>
 
 class AttitudeControl
 {
 public:
 	AttitudeControl() = default;
 	~AttitudeControl() = default;
+
+	// Natural frequency of the tilt feedforward reference model.
+	// Damping ratio is fixed at 1.0 (critical damping, monotonic settling).
+	// Placeholder value; revisit after flight test if needed.
+	static constexpr float kTiltFFNaturalFreq = 10.0f;
 
 	/**
 	 * Set proportional attitude control gain
@@ -74,24 +80,22 @@ public:
 	 * Set a new attitude setpoint replacing the one tracked before
 	 * @param qd desired vehicle attitude setpoint
 	 * @param yawspeed_setpoint [rad/s] yaw feed forward angular rate in world frame
+	 * @param dt [s] time since previous setpoint; <= 0 skips the FF derivative update
 	 */
-	void setAttitudeSetpoint(const matrix::Quatf &qd, const float yawspeed_setpoint)
-	{
-		_attitude_setpoint_q = qd;
-		_attitude_setpoint_q.normalize();
-		_yawspeed_setpoint = yawspeed_setpoint;
-	}
+	void setAttitudeSetpoint(const matrix::Quatf &qd, const float yawspeed_setpoint, const float dt = -1.f);
 
 	/**
 	 * Adjust last known attitude setpoint by a delta rotation
 	 * Optional use to avoid glitches when attitude estimate reference e.g. heading changes.
 	 * @param q_delta delta rotation to apply
 	 */
-	void adaptAttitudeSetpoint(const matrix::Quatf &q_delta)
-	{
-		_attitude_setpoint_q = q_delta * _attitude_setpoint_q;
-		_attitude_setpoint_q.normalize();
-	}
+	void adaptAttitudeSetpoint(const matrix::Quatf &q_delta);
+
+	/**
+	 * Gate the setpoint-derivative feedforward (the filter keeps running, only
+	 * its addition to the rate setpoint is suppressed). Used during autotune.
+	 */
+	void setFeedForwardEnabled(bool enabled) { _ff_enabled = enabled; }
 
 	/**
 	 * Run one control loop cycle calculation
@@ -107,4 +111,7 @@ private:
 
 	matrix::Quatf _attitude_setpoint_q; ///< latest known attitude setpoint e.g. from position control
 	float _yawspeed_setpoint{0.f}; ///< latest known yawspeed feed-forward setpoint
+
+	math::SecondOrderReferenceModel<matrix::Vector3f> _tilt_filter{kTiltFFNaturalFreq, 1.0f};
+	bool _ff_enabled{true};
 };

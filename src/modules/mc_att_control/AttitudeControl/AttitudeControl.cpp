@@ -41,6 +41,25 @@
 
 using namespace matrix;
 
+namespace
+{
+// Rotation vector taking world-z onto q's thrust direction (zero yaw content).
+Vector3f extractTiltState(const Quatf &q)
+{
+	const Vector3f e_z_d = q.dcm_z();
+	const Vector3f e_z_world(0.f, 0.f, 1.f);
+	const Vector3f tilt_axis = e_z_world.cross(e_z_d);
+	const float tilt_axis_norm = tilt_axis.norm();
+
+	if (tilt_axis_norm > FLT_EPSILON) {
+		const float tilt_angle = acosf(math::constrain(e_z_world.dot(e_z_d), -1.f, 1.f));
+		return (tilt_axis / tilt_axis_norm) * tilt_angle;
+	}
+
+	return Vector3f{};
+}
+} // namespace
+
 void AttitudeControl::setProportionalGain(const matrix::Vector3f &proportional_gain, const float yaw_weight)
 {
 	_proportional_gain = proportional_gain;
@@ -50,6 +69,28 @@ void AttitudeControl::setProportionalGain(const matrix::Vector3f &proportional_g
 	if (_yaw_w > 1e-4f) {
 		_proportional_gain(2) /= _yaw_w;
 	}
+}
+
+void AttitudeControl::setAttitudeSetpoint(const Quatf &qd, const float yawspeed_setpoint, const float dt)
+{
+	Quatf qd_normalized = qd;
+	qd_normalized.normalize();
+
+	// Tilt-only into the model; yaw is handled by _yawspeed_setpoint in update().
+	// The model auto-resets on dt <= 0 or dt > max_step.
+	_tilt_filter.update(dt, extractTiltState(qd_normalized));
+
+	_attitude_setpoint_q = qd_normalized;
+	_yawspeed_setpoint = yawspeed_setpoint;
+}
+
+void AttitudeControl::adaptAttitudeSetpoint(const Quatf &q_delta)
+{
+	_attitude_setpoint_q = q_delta * _attitude_setpoint_q;
+	_attitude_setpoint_q.normalize();
+	// Re-extract tilt and reseed the model so any tilt component of the heading
+	// reset isn't interpreted as real motion on the next update.
+	_tilt_filter.reset(extractTiltState(_attitude_setpoint_q));
 }
 
 matrix::Vector3f AttitudeControl::update(const Quatf &q) const
@@ -94,15 +135,20 @@ matrix::Vector3f AttitudeControl::update(const Quatf &q) const
 	// calculate angular rates setpoint
 	Vector3f rate_setpoint = eq.emult(_proportional_gain);
 
-	// Feed forward the yaw setpoint rate.
-	// yawspeed_setpoint is the feed forward commanded rotation around the world z-axis,
-	// but we need to apply it in the body frame (because _rates_sp is expressed in the body frame).
-	// Therefore we infer the world z-axis (expressed in the body frame) by taking the last column of R.transposed (== q.inversed)
-	// and multiply it by the yaw setpoint rate (yawspeed_setpoint).
-	// This yields a vector representing the commanded rotatation around the world z-axis expressed in the body frame
-	// such that it can be added to the rates setpoint.
-	if (std::isfinite(_yawspeed_setpoint)) {
-		rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint;
+	if (_ff_enabled) {
+		// Tilt FF from the reference model (world frame); rotate to body.
+		rate_setpoint += q.rotateVectorInverse(_tilt_filter.getRate());
+
+		// Feed forward the yaw setpoint rate.
+		// _yawspeed_setpoint is the feed forward commanded rotation around the world z-axis,
+		// but we need to apply it in the body frame (because _rates_sp is expressed in the body frame).
+		// Therefore we infer the world z-axis (expressed in the body frame) by taking the last column of R.transposed (== q.inversed)
+		// and multiply it by the yaw setpoint rate (_yawspeed_setpoint).
+		// This yields a vector representing the commanded rotatation around the world z-axis expressed in the body frame
+		// such that it can be added to the rates setpoint.
+		if (std::isfinite(_yawspeed_setpoint)) {
+			rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint;
+		}
 	}
 
 	// limit rates
