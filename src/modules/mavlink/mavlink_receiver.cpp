@@ -457,24 +457,8 @@ void MavlinkReceiver::handle_messages_in_gimbal_mode(mavlink_message_t &msg)
 bool
 MavlinkReceiver::evaluate_target_ok(int command, int target_system, int target_component)
 {
-	/* evaluate if this system should accept this command */
-	bool target_ok = false;
-
-	switch (command) {
-
-	case MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES:
-	case MAV_CMD_REQUEST_PROTOCOL_VERSION:
-		/* broadcast and ignore component */
-		target_ok = (target_system == 0) || (target_system == mavlink_system.sysid);
-		break;
-
-	default:
-		target_ok = ((target_system == 0) || (target_system == mavlink_system.sysid))
-			    && ((target_component == mavlink_system.compid) || (target_component == MAV_COMP_ID_ALL));
-		break;
-	}
-
-	return target_ok;
+	return ((target_system == 0) || (target_system == mavlink_system.sysid))
+	       && ((target_component == mavlink_system.compid) || (target_component == MAV_COMP_ID_ALL));
 }
 
 void
@@ -583,15 +567,7 @@ void MavlinkReceiver::handle_message_command_both(mavlink_message_t *msg, const 
 		return;
 	}
 
-	// First we handle legacy support requests which were used before we had
-	// the generic MAV_CMD_REQUEST_MESSAGE.
-	if (cmd_mavlink.command == MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES) {
-		result = handle_request_message_command(MAVLINK_MSG_ID_AUTOPILOT_VERSION);
-
-	} else if (cmd_mavlink.command == MAV_CMD_REQUEST_PROTOCOL_VERSION) {
-		result = handle_request_message_command(MAVLINK_MSG_ID_PROTOCOL_VERSION);
-
-	} else if (cmd_mavlink.command == MAV_CMD_GET_HOME_POSITION) {
+	if (cmd_mavlink.command == MAV_CMD_GET_HOME_POSITION) {
 		result = handle_request_message_command(MAVLINK_MSG_ID_HOME_POSITION);
 
 	} else if (cmd_mavlink.command == MAV_CMD_REQUEST_FLIGHT_INFORMATION) {
