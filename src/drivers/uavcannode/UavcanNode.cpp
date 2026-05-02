@@ -36,6 +36,13 @@
 #include "boot_app_shared.h"
 #include "boot_alt_app_shared.h"
 
+// Weak default: return the compile-time name from uavcan_board_identity.
+// Boards that resolve the name at runtime can provide a strong override.
+extern "C" __attribute__((weak)) const char *board_get_uavcan_hw_name(void)
+{
+	return HW_UAVCAN_NAME;
+}
+
 #include <drivers/drv_watchdog.h>
 #include <lib/geo/geo.h>
 #include <lib/version/version.h>
@@ -284,7 +291,7 @@ void UavcanNode::fill_node_info()
 	char fw_git_short[9] = {};
 	std::memmove(fw_git_short, px4_firmware_version_string(), 8);
 	char *end = nullptr;
-	swver.vcs_commit = std::strtol(fw_git_short, &end, 16);
+	swver.vcs_commit = std::strtoul(fw_git_short, &end, 16);
 	swver.optional_field_flags |= swver.OPTIONAL_FIELD_FLAG_VCS_COMMIT;
 	swver.major = AppDescriptor.major_version;
 	swver.minor = AppDescriptor.minor_version;
@@ -351,7 +358,7 @@ void UavcanNode::cb_beginfirmware_update(const uavcan::ReceivedDataStructure<Uav
 
 int UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 {
-	_node.setName(HW_UAVCAN_NAME);
+	_node.setName(board_get_uavcan_hw_name());
 
 	// Was the node_id supplied by the bootloader?
 

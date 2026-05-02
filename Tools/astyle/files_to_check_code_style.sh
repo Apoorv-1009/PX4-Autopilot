@@ -28,6 +28,7 @@ exec find boards msg src platforms test \
     -path src/modules/gyro_fft/CMSIS_5 -prune -o \
     -path src/modules/mavlink/mavlink -prune -o \
     -path src/modules/mc_raptor/blob -prune -o \
+    -path src/modules/simulation/gz_plugins/optical_flow/PX4-OpticalFlow -prune -o \
     -path test/fuzztest -prune -o \
     -path test/mavsdk_tests/catch2 -prune -o \
     -path src/lib/crypto/monocypher -prune -o \
@@ -39,6 +40,8 @@ exec find boards msg src platforms test \
     -path src/lib/cdrstream/rosidl -prune -o \
     -path src/modules/zenoh/zenoh-pico -prune -o \
     -path boards/modalai/voxl2/libfc-sensor-api -prune -o \
+    -path boards/modalai/voxl2/src/lib/mpa/libmodal-json -prune -o \
+    -path boards/modalai/voxl2/src/lib/mpa/libmodal-pipe -prune -o \
     -path src/drivers/actuators/vertiq_io/iq-module-communication-cpp -prune -o \
     -path src/lib/tensorflow_lite_micro/tflite_micro -prune -o \
     -path src/drivers/ins/sbgecom/sbgECom -prune -o \

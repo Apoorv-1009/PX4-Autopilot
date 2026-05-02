@@ -126,33 +126,6 @@ FailsafeBase::ActionOptions Failsafe::fromGfActParam(int param_value)
 	return options;
 }
 
-FailsafeBase::ActionOptions Failsafe::fromImbalancedPropActParam(int param_value)
-{
-	ActionOptions options{};
-
-	switch (imbalanced_propeller_failsafe_mode(param_value)) {
-	case imbalanced_propeller_failsafe_mode::Disabled:
-	default:
-		options.action = Action::None;
-		break;
-
-	case imbalanced_propeller_failsafe_mode::Warning:
-		options.action = Action::Warn;
-		break;
-
-	case imbalanced_propeller_failsafe_mode::Return:
-		options.action = Action::RTL;
-		options.clear_condition = ClearCondition::OnModeChangeOrDisarm;
-		break;
-
-	case imbalanced_propeller_failsafe_mode::Land:
-		options.action = Action::Land;
-		options.clear_condition = ClearCondition::OnModeChangeOrDisarm;
-		break;
-	}
-
-	return options;
-}
 
 FailsafeBase::ActionOptions Failsafe::fromActuatorFailureActParam(int param_value)
 {
@@ -442,6 +415,38 @@ FailsafeBase::ActionOptions Failsafe::fromRemainingFlightTimeLowActParam(int par
 	return options;
 }
 
+FailsafeBase::ActionOptions Failsafe::fromOdidFailActParam(int param_value)
+{
+	ActionOptions options{};
+
+	switch (open_drone_id_failsafe_mode(param_value)) {
+	case open_drone_id_failsafe_mode::Return_mode:
+		options.action = Action::RTL;
+		options.clear_condition = ClearCondition::OnModeChangeOrDisarm;
+		break;
+
+	case open_drone_id_failsafe_mode::Land_mode:
+		options.action = Action::Land;
+		options.clear_condition = ClearCondition::OnModeChangeOrDisarm;
+		break;
+
+	case open_drone_id_failsafe_mode::Terminate:
+		options.allow_user_takeover = UserTakeoverAllowed::Never;
+		options.action = Action::Terminate;
+		options.clear_condition = ClearCondition::Never;
+		break;
+
+	case open_drone_id_failsafe_mode::None:
+	case open_drone_id_failsafe_mode::Warning:
+	case open_drone_id_failsafe_mode::Error:
+	default:
+		options.action = Action::None;
+		break;
+	}
+
+	return options;
+}
+
 bool Failsafe::isFailsafeIgnored(uint8_t user_intended_mode, int32_t exception_mask_parameter)
 {
 	switch (user_intended_mode) {
@@ -510,7 +515,7 @@ void Failsafe::checkStateAndMode(const hrt_abstime &time_us, const State &state,
 					   || state.user_intended_mode == vehicle_status_s::NAVIGATION_STATE_AUTO_PRECLAND;
 
 	const bool dll_loss_ignored = isFailsafeIgnored(state.user_intended_mode, _param_com_dll_except.get())
-				      || ignore_any_link_loss_vtol_takeoff_fixedwing || dll_loss_ignored_land;
+				      || ignore_any_link_loss_vtol_takeoff_fixedwing || dll_loss_ignored_land || !state.armed;
 
 	if (_param_nav_dll_act.get() != int32_t(gcs_connection_loss_failsafe_mode::Disabled) && !dll_loss_ignored) {
 		CHECK_FAILSAFE(status_flags, gcs_connection_lost, fromNavDllOrRclActParam(_param_nav_dll_act.get()).causedBy(Cause::GCSConnectionLoss));
@@ -565,13 +570,21 @@ void Failsafe::checkStateAndMode(const hrt_abstime &time_us, const State &state,
 	CHECK_FAILSAFE(status_flags, battery_low_remaining_time,
 		       ActionOptions(fromRemainingFlightTimeLowActParam(_param_com_fltt_low_act.get())));
 
-	if ((_armed_time != 0)
-	    && (time_us < _armed_time + static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s))
-	   ) {
+	const hrt_abstime spoolup = static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s);
+
+	if ((_armed_time != 0) && (time_us < _armed_time + spoolup)) {
 		CHECK_FAILSAFE(status_flags, battery_unhealthy, ActionOptions(Action::Disarm).cannotBeDeferred());
 
 	} else {
 		CHECK_FAILSAFE(status_flags, battery_unhealthy, Action::Warn);
+	}
+
+	// Parachute system health failsafe
+	CHECK_FAILSAFE(status_flags, parachute_unhealthy, Action::RTL);
+
+	// Remote ID (Open Drone ID) loss failsafe
+	if (state.armed && _param_com_arm_odid.get() >= int32_t(open_drone_id_failsafe_mode::Return_mode)) {
+		CHECK_FAILSAFE(status_flags, remote_id_unhealthy, fromOdidFailActParam(_param_com_arm_odid.get()));
 	}
 
 	// Battery low failsafe
@@ -604,9 +617,7 @@ void Failsafe::checkStateAndMode(const hrt_abstime &time_us, const State &state,
 
 
 	// Handle fails during spoolup just after arming
-	if ((_armed_time != 0)
-	    && (time_us < _armed_time + static_cast<hrt_abstime>(_param_com_spoolup_time.get() * 1_s))
-	   ) {
+	if ((_armed_time != 0) && (time_us < _armed_time + spoolup)) {
 		_last_state_fd_esc_arming = checkFailsafe(_caller_id_fd_esc_arming, _last_state_fd_esc_arming,
 					    status_flags.fd_esc_arming_failure,
 					    ActionOptions(Action::Disarm).cannotBeDeferred());
@@ -616,20 +627,20 @@ void Failsafe::checkStateAndMode(const hrt_abstime &time_us, const State &state,
 	}
 
 	// Handle fails during the early takeoff phase
-	if ((_armed_time != 0)
-	    && (time_us < _armed_time
-		+ static_cast<hrt_abstime>((_param_com_lkdown_tko.get() + _param_com_spoolup_time.get()) * 1_s))
-	   ) {
+	if ((_armed_time != 0) && (time_us < _armed_time + spoolup + 3_s)) {
 		CHECK_FAILSAFE(status_flags, fd_critical_failure, ActionOptions(Action::Disarm).cannotBeDeferred());
+		CHECK_FAILSAFE(status_flags, fd_alt_loss, ActionOptions(Action::Disarm).cannotBeDeferred());
 
 	} else if (!circuit_breaker_enabled_by_val(_param_cbrk_flightterm.get(), CBRK_FLIGHTTERM_KEY)) {
 		CHECK_FAILSAFE(status_flags, fd_critical_failure, ActionOptions(Action::Terminate).cannotBeDeferred());
+		CHECK_FAILSAFE(status_flags, fd_alt_loss, ActionOptions(Action::Terminate).cannotBeDeferred());
 
 	} else {
 		CHECK_FAILSAFE(status_flags, fd_critical_failure, Action::Warn);
+		CHECK_FAILSAFE(status_flags, fd_alt_loss, Action::Warn);
 	}
 
-	CHECK_FAILSAFE(status_flags, fd_imbalanced_prop, fromImbalancedPropActParam(_param_com_imb_prop_act.get()));
+	CHECK_FAILSAFE(status_flags, fd_imbalanced_prop, Action::Warn);
 	CHECK_FAILSAFE(status_flags, fd_motor_failure, fromActuatorFailureActParam(_param_com_actuator_failure_act.get()));
 
 

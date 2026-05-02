@@ -33,6 +33,7 @@
 
 #include "FixedWingModeManager.hpp"
 
+#include <cmath>
 #include <px4_platform_common/events.h>
 #include <uORB/topics/longitudinal_control_configuration.h>
 
@@ -139,7 +140,7 @@ FixedWingModeManager::vehicle_command_poll()
 
 		} else if (vehicle_command.command == vehicle_command_s::VEHICLE_CMD_DO_CHANGE_SPEED) {
 
-			if ((static_cast<uint8_t>(vehicle_command.param1 + .5f) == vehicle_command_s::SPEED_TYPE_AIRSPEED)) {
+			if ((static_cast<uint8_t>(lroundf(vehicle_command.param1)) == vehicle_command_s::SPEED_TYPE_AIRSPEED)) {
 				if (vehicle_command.param2 > FLT_EPSILON) {	// param2 is an equivalent airspeed setpoint
 					if (_control_mode_current == FW_POSCTRL_MODE_AUTO) {
 						_pos_sp_triplet.current.cruising_speed = vehicle_command.param2;
@@ -252,7 +253,7 @@ FixedWingModeManager::vehicle_attitude_poll()
 		_pitch = euler_angles(1);
 
 		const Vector3f body_acceleration = R.transpose() * Vector3f{_local_pos.ax, _local_pos.ay, _local_pos.az};
-		_body_acceleration_x = body_acceleration(0);
+		_body_acceleration_norm = body_acceleration.norm();
 
 		const Vector3f body_velocity = R.transpose() * Vector3f{_local_pos.vx, _local_pos.vy, _local_pos.vz};
 		_body_velocity_x = body_velocity(0);
@@ -1028,7 +1029,7 @@ FixedWingModeManager::controlAutoFigureEight(const float control_interval, const
 	}
 }
 
-void FixedWingModeManager::publishFigureEightStatus(const position_setpoint_s pos_sp)
+void FixedWingModeManager::publishFigureEightStatus(const position_setpoint_s &pos_sp)
 {
 	figure_eight_status_s figure_eight_status{};
 	figure_eight_status.timestamp = hrt_absolute_time();
@@ -1195,8 +1196,8 @@ FixedWingModeManager::control_auto_takeoff(const hrt_abstime &now, const float c
 			if (_control_mode.flag_armed) {
 				/* Perform launch detection */
 
-				/* Detect launch using body X (forward) acceleration */
-				_launchDetector.update(control_interval, _body_acceleration_x);
+				/* Detect launch using body acceleration norm */
+				_launchDetector.update(control_interval, _body_acceleration_norm);
 			}
 
 		} else	{
@@ -1371,8 +1372,8 @@ FixedWingModeManager::control_auto_takeoff_no_nav(const hrt_abstime &now, const 
 		    _launchDetector.getLaunchDetected() < launch_detection_status_s::STATE_FLYING) {
 
 			if (_control_mode.flag_armed) {
-				/* Detect launch using body X (forward) acceleration */
-				_launchDetector.update(control_interval, _body_acceleration_x);
+				/* Detect launch using body acceleration norm */
+				_launchDetector.update(control_interval, _body_acceleration_norm);
 			}
 
 		} else	{
@@ -2563,7 +2564,7 @@ void FixedWingModeManager::publishLocalPositionSetpoint(const position_setpoint_
 	_local_pos_sp_pub.publish(local_position_setpoint);
 }
 
-void FixedWingModeManager::publishOrbitStatus(const position_setpoint_s pos_sp)
+void FixedWingModeManager::publishOrbitStatus(const position_setpoint_s &pos_sp)
 {
 	orbit_status_s orbit_status{};
 	orbit_status.timestamp = hrt_absolute_time();

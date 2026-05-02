@@ -527,6 +527,12 @@ Replay::readAndAddSubscription(std::ifstream &file, uint16_t msg_size)
 	}
 
 	Subscription *subscription = new Subscription();
+
+	if (subscription == nullptr) {
+		delete compat;
+		return ReadAndAndAddSubResult::kFailure;
+	}
+
 	subscription->orb_meta = orb_meta;
 	subscription->multi_id = multi_id;
 	subscription->compat = compat;
@@ -1259,7 +1265,7 @@ The module is typically used together with uORB publisher rules, to specify whic
 The replay module will just publish all messages that are found in the log. It also applies the parameters from
 the log.
 
-The replay procedure is documented on the [System-wide Replay](https://docs.px4.io/main/en/debug/system_wide_replay.html)
+The replay procedure is documented on the [System-wide Replay](../debug/system_wide_replay.md)
 page.
 )DESCR_STR");
 

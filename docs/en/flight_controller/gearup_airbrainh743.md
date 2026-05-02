@@ -1,6 +1,6 @@
 # Gear Up AirBrainH743
 
-:::warning
+::: warning
 PX4 does not manufacture this (or any) autopilot.
 Contact the [manufacturer](https://takeyourgear.com/) for hardware support.
 :::
@@ -31,7 +31,7 @@ For more information and pinout, check the [GitHub documentation](https://github
 
 ## Connectors and Pins
 
-:::warning
+::: warning
 The pin order is different from the Pixhawk standard (compatible to the Betaflight standard).
 :::
 
@@ -74,7 +74,7 @@ Download the [gearup_airbrainh743_bootloader.bin](https://github.com/PX4/PX4-Aut
 
 To [build PX4](../dev_setup/building_px4.md) for this target:
 
-```
+```sh
 make gearup_airbrainh743_default
 ```
 
@@ -84,12 +84,24 @@ Firmware can be installed in any of the normal ways:
 
 - Build and upload the source:
 
-  ```
+  ```sh
   make gearup_airbrainh743_default upload
   ```
 
 - [Load the firmware](../config/firmware.md) using _QGroundControl_.
   You can use either pre-built firmware or your own custom firmware.
+
+### Flash Storage Troubleshooting
+
+The AirBrainH743 uses a 128MB NAND flash (W25N) with a littlefs filesystem for [logging](../dev_log/logging.md).
+If the flash filesystem becomes corrupted, you can reformat it using the [System Console](../debug/system_console.md):
+
+```sh
+mklittlefs /dev/mtd0 /fs/flash
+```
+
+This will erase all data on the flash and create a fresh littlefs filesystem.
+The filesystem is immediately available after the command completes.
 
 ### System Console
 

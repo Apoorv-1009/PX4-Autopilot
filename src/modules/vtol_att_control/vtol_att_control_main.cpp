@@ -79,6 +79,12 @@ VtolAttitudeControl::VtolAttitudeControl() :
 		exit_and_cleanup(desc);
 	}
 
+	if (_vtol_type == nullptr) {
+		PX4_ERR("vtol type allocation failed");
+		exit_and_cleanup(desc);
+		return;
+	}
+
 	_flaps_setpoint_pub.advertise();
 	_spoilers_setpoint_pub.advertise();
 	_vtol_vehicle_status_pub.advertise();
@@ -149,7 +155,7 @@ void VtolAttitudeControl::vehicle_cmd_poll()
 
 			uint8_t result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED;
 
-			const int transition_command_param1 = int(vehicle_command.param1 + 0.5f);
+			const int transition_command_param1 = static_cast<int>(lround(vehicle_command.param1));
 
 			// deny transition from MC to FW in Takeoff, Land, RTL and Orbit
 			if (transition_command_param1 == vtol_vehicle_status_s::VEHICLE_VTOL_STATE_FW &&
@@ -162,7 +168,7 @@ void VtolAttitudeControl::vehicle_cmd_poll()
 
 			} else {
 				_transition_command = transition_command_param1;
-				_immediate_transition = (PX4_ISFINITE(vehicle_command.param2)) ? int(vehicle_command.param2 + 0.5f) : false;
+				_immediate_transition = (PX4_ISFINITE(vehicle_command.param2)) ? static_cast<int>(lround(vehicle_command.param2)) : false;
 
 				// reset fixed_wing_system_failure flag when a new transition to FW is triggered
 				if (_transition_command == vtol_vehicle_status_s::VEHICLE_VTOL_STATE_FW) {
@@ -301,6 +307,12 @@ VtolAttitudeControl::Run()
 	}
 
 #endif // !ENABLE_LOCKSTEP_SCHEDULER
+
+	if (_vtol_type == nullptr) {
+		PX4_ERR("vtol type unavailable");
+		exit_and_cleanup(desc);
+		return;
+	}
 
 	if (!_initialized) {
 

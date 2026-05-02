@@ -110,14 +110,13 @@ FwLateralLongitudinalControl::parameters_update()
 	_tecs.set_airspeed_error_time_constant(_param_fw_t_tas_error_tc.get());
 	_tecs.set_ste_rate_time_const(_param_ste_rate_time_const.get());
 	_tecs.set_seb_rate_ff_gain(_param_seb_rate_ff.get());
-	_tecs.set_airspeed_measurement_std_dev(_param_speed_standard_dev.get());
-	_tecs.set_airspeed_rate_measurement_std_dev(_param_speed_rate_standard_dev.get());
-	_tecs.set_airspeed_filter_process_std_dev(_param_process_noise_standard_dev.get());
 
 	_roll_slew_rate.setSlewRate(radians(_param_fw_pn_r_slew_max.get()));
 
 	_tecs_alt_time_const_slew_rate.setSlewRate(TECS_ALT_TIME_CONST_SLEW_RATE);
 	_tecs_alt_time_const_slew_rate.setForcedValue(_param_fw_t_h_error_tc.get() * _param_fw_thrtc_sc.get());
+
+	_airspeed_direction_control.setPGainFromPeriodAndDamping(_param_npfg_damping.get(), _param_npfg_period.get());
 }
 
 void FwLateralLongitudinalControl::Run()
@@ -298,7 +297,7 @@ void FwLateralLongitudinalControl::Run()
 			// additional is_finite checks that should not be necessary, but are kept for safety
 			float roll_body = PX4_ISFINITE(roll_sp) ? roll_sp : 0.0f;
 			float pitch_body = PX4_ISFINITE(pitch_sp) ? pitch_sp : 0.0f;
-			const float yaw_body = _yaw; // yaw is not controlled in fixed wing, need to set it though for quaternion generation
+			float yaw_body = _yaw;
 			const float thrust_body_x = PX4_ISFINITE(throttle_sp) ? throttle_sp : 0.0f;
 
 			if (_control_mode_sub.get().flag_control_manual_enabled) {

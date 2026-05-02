@@ -38,8 +38,8 @@
 #include <px4_platform_common/posix.h>
 
 #include <uORB/topics/parameter_update.h>
-#include <uORB/topics/sensor_combined.h>
 
+ModuleBase::Descriptor TemplateModule::desc{task_spawn, custom_command, print_usage};
 
 int TemplateModule::print_status()
 {
@@ -52,14 +52,14 @@ int TemplateModule::print_status()
 int TemplateModule::custom_command(int argc, char *argv[])
 {
 	/*
-	if (!is_running()) {
+	if (!is_running(desc)) {
 		print_usage("not running");
 		return 1;
 	}
 
 	// additional custom commands can be handled like this:
 	if (!strcmp(argv[0], "do-something")) {
-		get_instance()->do_something();
+		get_instance<TemplateModule>(desc)->do_something();
 		return 0;
 	}
 	 */
@@ -144,42 +144,20 @@ TemplateModule::TemplateModule(int example_param, bool example_flag)
 
 void TemplateModule::run()
 {
-	// Example: run the loop synchronized to the sensor_combined topic publication
-	int sensor_combined_sub = orb_subscribe(ORB_ID(sensor_combined));
-
-	px4_pollfd_struct_t fds[1];
-	fds[0].fd = sensor_combined_sub;
-	fds[0].events = POLLIN;
-
 	// initialize parameters
 	parameters_update(true);
 
 	while (!should_exit()) {
 
-		// wait for up to 1000ms for data
-		int pret = px4_poll(fds, (sizeof(fds) / sizeof(fds[0])), 1000);
-
-		if (pret == 0) {
-			// Timeout: let the loop run anyway, don't do `continue` here
-
-		} else if (pret < 0) {
-			// this is undesirable but not much we can do
-			PX4_ERR("poll error %d, %d", pret, errno);
-			px4_usleep(50000);
-			continue;
-
-		} else if (fds[0].revents & POLLIN) {
-
-			struct sensor_combined_s sensor_combined;
-			orb_copy(ORB_ID(sensor_combined), sensor_combined_sub, &sensor_combined);
+		if (_sensor_accel_sub.updated()) {
+			sensor_accel_s accel{};
+			_sensor_accel_sub.copy(&accel);
 			// TODO: do something with the data...
-
 		}
 
 		parameters_update();
+		px4_usleep(10_ms);
 	}
-
-	orb_unsubscribe(sensor_combined_sub);
 }
 
 void TemplateModule::parameters_update(bool force)

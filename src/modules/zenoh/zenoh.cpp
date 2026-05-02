@@ -115,6 +115,8 @@ int ZENOH::generate_rmw_zenoh_topic_keyexpr(const char *topic, const uint8_t *ri
 	if (type_name) {
 		strncpy(type, type_name, TOPIC_INFO_SIZE);
 		toCamelCase(type); // Convert uORB type to camel case
+
+#ifdef CONFIG_ZENOH_KEY_TYPE_HASH
 		return snprintf(keyexpr, KEYEXPR_SIZE, "%" PRId32 "%s/"
 				KEYEXPR_MSG_NAME "%s_/RIHS01_"
 				"%02x%02x%02x%02x%02x%02x%02x%02x"
@@ -131,6 +133,11 @@ int ZENOH::generate_rmw_zenoh_topic_keyexpr(const char *topic, const uint8_t *ri
 				rihs_hash[24], rihs_hash[25], rihs_hash[26], rihs_hash[27],
 				rihs_hash[28], rihs_hash[29], rihs_hash[30], rihs_hash[31]
 			       );
+#else
+		return snprintf(keyexpr, KEYEXPR_SIZE, "%" PRId32 "%s/"
+				KEYEXPR_MSG_NAME "%s_/TypeHashNotSupported",
+				_zenoh_domain_id.get(), topic, type);
+#endif
 	}
 
 	return -1;
@@ -155,6 +162,7 @@ int ZENOH::generate_rmw_zenoh_topic_liveliness_keyexpr(const z_id_t *id, const c
 		str++;
 	}
 
+#ifdef CONFIG_ZENOH_KEY_TYPE_HASH
 	return snprintf(keyexpr, KEYEXPR_SIZE,
 			"@ros2_lv/%" PRId32 "/"
 			"%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x/"
@@ -184,6 +192,25 @@ int ZENOH::generate_rmw_zenoh_topic_liveliness_keyexpr(const z_id_t *id, const c
 			rihs_hash[24], rihs_hash[25], rihs_hash[26], rihs_hash[27],
 			rihs_hash[28], rihs_hash[29], rihs_hash[30], rihs_hash[31]
 		       );
+#else
+	return snprintf(keyexpr, KEYEXPR_SIZE,
+			"@ros2_lv/%" PRId32 "/"
+			"%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x/"
+			"0/11/%s/%%/%%/px4_%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x/%s/"
+			KEYEXPR_MSG_NAME "%s_/TypeHashNotSupported"
+			"/::,7:,:,:,,",
+			_zenoh_domain_id.get(),
+			id->id[0], id->id[1],  id->id[2], id->id[3], id->id[4], id->id[5], id->id[6],
+			id->id[7], id->id[8],  id->id[9], id->id[10], id->id[11], id->id[12], id->id[13],
+			id->id[14], id->id[15],
+			entity_str,
+			_px4_guid[0], _px4_guid[1], _px4_guid[2], _px4_guid[3],
+			_px4_guid[4], _px4_guid[5], _px4_guid[6], _px4_guid[7],
+			_px4_guid[8], _px4_guid[9], _px4_guid[10], _px4_guid[11],
+			_px4_guid[12], _px4_guid[13], _px4_guid[14], _px4_guid[15],
+			topic_lv, type_camel_case
+		       );
+#endif
 }
 
 int ZENOH::setupSession()
@@ -227,7 +254,6 @@ int ZENOH::setupSession()
 	// Start read and lease tasks for zenoh-pico
 	if (zp_start_read_task(z_loan_mut(_s), NULL) < 0 || zp_start_lease_task(z_loan_mut(_s), NULL) < 0) {
 		PX4_ERR("Unable to start read and lease tasks");
-		z_drop(z_move(_s));
 		ret = -EINVAL;
 	}
 
@@ -335,15 +361,38 @@ int ZENOH::setupTopics(px4_pollfd_struct_t *pfds)
 		char topic[TOPIC_INFO_SIZE];
 		char type[TOPIC_INFO_SIZE];
 		int instance;
+		z_publisher_options_t global_opts;
+		z_publisher_options_default(&global_opts);
+		global_opts.congestion_control = (z_congestion_control_t)_zenoh_pub_cc.get();
+		global_opts.is_express = (bool)_zenoh_pub_expr.get();
+		global_opts.priority = (z_priority_t)_zenoh_pub_prio.get();
+#ifdef Z_FEATURE_UNSTABLE_API
+		global_opts.reliability = (z_reliability_t)_zenoh_pub_rel.get();
+#endif
 
 		for (i = 0; i < _pub_count; i++) {
+
+#ifdef CONFIG_ZENOH_PUB_OPTION_OVERRIDE
+			z_publisher_options_t pub_opts = global_opts;
+#endif
+
+#ifdef CONFIG_ZENOH_PUB_OPTION_OVERRIDE
+
+			if (_config.getPublisherMapping(topic, type, &instance, &pub_opts)) {
+#else
+
 			if (_config.getPublisherMapping(topic, type, &instance)) {
+#endif
 				_zenoh_publishers[i] = genPublisher(type, instance);
 				const uint8_t *rihs_hash = getRIHS01_Hash(type);
 
 				if (rihs_hash && _zenoh_publishers[i] != 0 &&
 				    generate_rmw_zenoh_topic_keyexpr(topic, rihs_hash, type, keyexpr) > 0) {
-					_zenoh_publishers[i]->declare_publisher(_s, keyexpr, (uint8_t *)&_px4_guid);
+#ifdef CONFIG_ZENOH_PUB_OPTION_OVERRIDE
+					_zenoh_publishers[i]->declare_publisher(_s, keyexpr, (uint8_t *)&_px4_guid, &pub_opts);
+#else
+					_zenoh_publishers[i]->declare_publisher(_s, keyexpr, (uint8_t *)&_px4_guid, &global_opts);
+#endif
 					_zenoh_publishers[i]->setPollFD(&pfds[i]);
 #ifdef CONFIG_ZENOH_RMW_LIVELINESS
 
@@ -388,6 +437,42 @@ int ZENOH::setupTopics(px4_pollfd_struct_t *pfds)
 	return ret;
 }
 
+void ZENOH::cleanupSession()
+{
+	PX4_INFO("Cleaning up Zenoh session...");
+
+	for (int i = 0; i < _sub_count; i++) {
+		if (_zenoh_subscribers && _zenoh_subscribers[i]) {
+			delete _zenoh_subscribers[i];
+		}
+	}
+
+	if (_zenoh_subscribers) {
+		free(_zenoh_subscribers);
+		_zenoh_subscribers = nullptr;
+	}
+
+	for (int i = 0; i < _pub_count; i++) {
+		if (_zenoh_publishers && _zenoh_publishers[i]) {
+			delete _zenoh_publishers[i];
+		}
+	}
+
+	if (_zenoh_publishers) {
+		free(_zenoh_publishers);
+		_zenoh_publishers = nullptr;
+	}
+
+	if (z_internal_check(_s)) {
+		zp_stop_read_task(z_session_loan_mut(&_s));
+		zp_stop_lease_task(z_session_loan_mut(&_s));
+
+		z_drop(z_session_move(&_s));
+	}
+
+	connected = false;
+}
+
 void ZENOH::run()
 {
 	z_result_t ret;
@@ -398,6 +483,8 @@ void ZENOH::run()
 
 	if (setupSession() < 0) {
 		PX4_ERR("Failed to setup Zenoh session");
+		cleanupSession();
+		exit_and_cleanup(desc);
 		return;
 	}
 
@@ -407,6 +494,8 @@ void ZENOH::run()
 
 	if (setupTopics(pfds) < 0) {
 		PX4_ERR("Failed to setup topics");
+		cleanupSession();
+		exit_and_cleanup(desc);
 		return;
 	}
 
@@ -437,30 +526,7 @@ void ZENOH::run()
 		}
 	}
 
-	// Exiting cleaning up publisher and subscribers
-	for (i = 0; i < _sub_count; i++) {
-		if (_zenoh_subscribers[i]) {
-			delete _zenoh_subscribers[i];
-		}
-	}
-
-	free(_zenoh_subscribers);
-
-	for (i = 0; i < _pub_count; i++) {
-		if (_zenoh_publishers[i]) {
-			delete _zenoh_publishers[i];
-		}
-	}
-
-	free(_zenoh_publishers);
-
-	// Stop read and lease tasks for zenoh-pico
-	zp_stop_read_task(z_session_loan_mut(&_s));
-	zp_stop_lease_task(z_session_loan_mut(&_s));
-
-	z_drop(z_session_move(&_s));
-
-	connected = false;
+	cleanupSession();
 	exit_and_cleanup(desc);
 }
 
@@ -493,7 +559,15 @@ Zenoh demo bridge
 	PRINT_MODULE_USAGE_COMMAND("stop");
 	PRINT_MODULE_USAGE_COMMAND("status");
 	PRINT_MODULE_USAGE_COMMAND("config");
+
+#ifdef CONFIG_ZENOH_PUB_OPTION_OVERRIDE
+	PX4_INFO_RAW("     add publisher  <zenoh_topic> <uorb_topic> [uorb_instance] [options]  Publish uORB topic to Zenoh\n");
+	PX4_INFO_RAW("          [options]  key=value pairs: cc=drop|block, express=true|false,\n");
+	PX4_INFO_RAW("                                      prio=real_time|interactive_high|interactive_low|data_high|data|data_low|background,\n");
+	PX4_INFO_RAW("                                      rel=reliable|best_effort (e.g. \"cc=block,express=true\")\n");
+#else
 	PX4_INFO_RAW("     add publisher  <zenoh_topic> <uorb_topic> <optional uorb_instance>  Publish uORB topic to Zenoh\n");
+#endif
 	PX4_INFO_RAW("     add subscriber <zenoh_topic> <uorb_topic> <optional uorb_instance>  Publish Zenoh topic to uORB\n");
 	PX4_INFO_RAW("     delete publisher  <zenoh_topic>\n");
 	PX4_INFO_RAW("     delete subscriber <zenoh_topic>\n");
