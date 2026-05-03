@@ -567,18 +567,8 @@ void MavlinkReceiver::handle_message_command_both(mavlink_message_t *msg, const 
 		return;
 	}
 
-	if (cmd_mavlink.command == MAV_CMD_GET_HOME_POSITION) {
-		result = handle_request_message_command(MAVLINK_MSG_ID_HOME_POSITION);
-
-	} else if (cmd_mavlink.command == MAV_CMD_REQUEST_FLIGHT_INFORMATION) {
-		result = handle_request_message_command(MAVLINK_MSG_ID_FLIGHT_INFORMATION);
-
-	} else if (cmd_mavlink.command == MAV_CMD_REQUEST_STORAGE_INFORMATION) {
-		result = handle_request_message_command(MAVLINK_MSG_ID_STORAGE_INFORMATION);
-
-	} else if (cmd_mavlink.command == MAV_CMD_SET_MESSAGE_INTERVAL) {
-		if (set_message_interval(
-			    (int)(cmd_mavlink.param1 + 0.5f), cmd_mavlink.param2, cmd_mavlink.param3, cmd_mavlink.param4, vehicle_command.param7)) {
+	if (cmd_mavlink.command == MAV_CMD_SET_MESSAGE_INTERVAL) {
+			(int)(cmd_mavlink.param1 + 0.5f), cmd_mavlink.param2, cmd_mavlink.param3, cmd_mavlink.param4, vehicle_command.param7)) {
 			result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_FAILED;
 		}
 
@@ -3211,7 +3201,7 @@ void MavlinkReceiver::handle_message_open_drone_id_system(
 	open_drone_id_system_s odid_system{};
 	memset(&odid_system, 0, sizeof(odid_system));
 
-	odid_system.timestamp = hrt_absolute_time();
+	odid_system.timestamp = odid_module.timestamp;
 	memcpy(odid_system.id_or_mac, odid_module.id_or_mac, sizeof(odid_system.id_or_mac));
 	odid_system.operator_location_type = odid_module.operator_location_type;
 	odid_system.classification_type = odid_module.classification_type;
