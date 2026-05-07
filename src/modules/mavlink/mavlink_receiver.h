@@ -248,13 +248,15 @@ private:
 	void updateParams() override;
 
 	Mavlink &_mavlink;
+	MavlinkTimesync			_mavlink_timesync;
+	MavlinkStatustextHandler	_mavlink_statustext_handler;
 
+#if !defined(CONFIG_MAVLINK_MINIMAL)
 	MavlinkFTP			_mavlink_ftp;
 	MavlinkLogHandler		_mavlink_log_handler;
 	MavlinkMissionManager		_mission_manager;
 	MavlinkParametersManager	_parameters_manager;
-	MavlinkTimesync			_mavlink_timesync;
-	MavlinkStatustextHandler	_mavlink_statustext_handler;
+#endif // CONFIG_MAVLINK_MINIMAL
 
 	mavlink_status_t		_status{}; ///< receiver status, used for mavlink_parse_char()
 
@@ -292,7 +294,7 @@ private:
 	uint8_t _mavlink_status_last_parse_error{0};
 	uint16_t _mavlink_status_last_packet_rx_drop_count{0};
 
-	// ORB publications
+	// ORB publications (always available - lightweight data publishers)
 	uORB::Publication<airspeed_s>				_airspeed_pub{ORB_ID(airspeed)};
 	uORB::Publication<battery_status_s>			_battery_pub{ORB_ID(battery_status)};
 	uORB::Publication<camera_status_s>			_camera_status_pub{ORB_ID(camera_status)};
@@ -350,7 +352,7 @@ private:
 	uORB::Publication<vehicle_command_s>     _cmd_pub{ORB_ID(vehicle_command)};
 	uORB::Publication<vehicle_command_ack_s> _cmd_ack_pub{ORB_ID(vehicle_command_ack)};
 
-	// ORB subscriptions
+	// ORB subscriptions (always available - essential for flight control)
 	uORB::Subscription	_actuator_armed_sub{ORB_ID(actuator_armed)};
 	uORB::Subscription	_home_position_sub{ORB_ID(home_position)};
 	uORB::Subscription	_vehicle_attitude_sub{ORB_ID(vehicle_attitude)};

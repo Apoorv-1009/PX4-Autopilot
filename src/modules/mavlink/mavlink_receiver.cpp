@@ -79,6 +79,7 @@ MavlinkReceiver::~MavlinkReceiver()
 	delete[] _received_msg_stats;
 #endif // !CONSTRAINED_FLASH
 
+	// Publications are always available, so unadvertise them unconditionally
 	_distance_sensor_pub.unadvertise();
 	_gps_inject_data_pub.unadvertise();
 	_rc_pub.unadvertise();
@@ -109,11 +110,15 @@ static constexpr vehicle_odometry_s vehicle_odometry_empty {
 MavlinkReceiver::MavlinkReceiver(Mavlink &parent) :
 	ModuleParams(nullptr),
 	_mavlink(parent),
+	_mavlink_timesync(parent),
+	_mavlink_statustext_handler()
+#if !defined(CONFIG_MAVLINK_MINIMAL)
+	,
 	_mavlink_ftp(parent),
 	_mavlink_log_handler(parent),
 	_mission_manager(parent),
-	_parameters_manager(parent),
-	_mavlink_timesync(parent)
+	_parameters_manager(parent)
+#endif // CONFIG_MAVLINK_MINIMAL
 {
 }
 
@@ -376,6 +381,7 @@ MavlinkReceiver::handle_message(mavlink_message_t *msg)
 
 	}
 
+#if !defined(CONFIG_MAVLINK_MINIMAL)
 	/* handle packet with mission manager */
 	_mission_manager.handle_message(msg);
 
@@ -398,6 +404,7 @@ MavlinkReceiver::handle_message(mavlink_message_t *msg)
 
 	/* handle packet with log component */
 	_mavlink_log_handler.handle_message(msg);
+#endif // CONFIG_MAVLINK_MINIMAL
 
 	/* handle packet with timesync component */
 	_mavlink_timesync.handle_message(msg);
@@ -3227,7 +3234,9 @@ MavlinkReceiver::run()
 							break;
 
 						default:
+#if !defined(CONFIG_MAVLINK_MINIMAL)
 							handle_message(&msg);
+#endif
 							break;
 						}
 
@@ -3278,6 +3287,7 @@ MavlinkReceiver::run()
 
 		CheckHeartbeats(t);
 
+#if !defined(CONFIG_MAVLINK_MINIMAL)
 		if (t - last_send_update > timeout * 1000) {
 			_mission_manager.check_active_mission();
 			_mission_manager.send();
@@ -3293,6 +3303,9 @@ MavlinkReceiver::run()
 			_mavlink_log_handler.send();
 			last_send_update = t;
 		}
+#else
+		(void)last_send_update;  // Suppress unused variable warning in minimal mode
+#endif // CONFIG_MAVLINK_MINIMAL
 
 		if (_tune_publisher != nullptr) {
 			_tune_publisher->publish_next_tune(t);
